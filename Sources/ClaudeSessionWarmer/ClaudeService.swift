@@ -249,6 +249,12 @@ private struct KeychainStatusError: Error {
     let status: OSStatus
 }
 
+enum LegacyCredentialSnapshot: Equatable {
+    case value(Data)
+    case absent
+    case unavailableWithoutInteraction
+}
+
 final class ClaudeService {
     static let loginArguments = ["auth", "login", "--claudeai"]
     private static let knownCLIPaths = [
@@ -296,13 +302,21 @@ final class ClaudeService {
         }
     }
 
-    private func restoreLoginKeychain(legacySnapshot: Data?, scopedService: String) throws {
-        deleteSourceCredential(service: scopedService)
-        if let legacySnapshot {
-            try upsertSourceCredential(legacySnapshot, service: ClaudeCredentialQueries.sourceService)
-        } else {
+    private func restoreLegacyFallback(_ snapshot: LegacyCredentialSnapshot) throws {
+        switch snapshot {
+        case .value(let data):
+            try upsertSourceCredential(data, service: ClaudeCredentialQueries.sourceService)
+        case .absent:
             deleteSourceCredential(service: ClaudeCredentialQueries.sourceService)
+        case .unavailableWithoutInteraction:
+            return
         }
+    }
+
+    private func restoreLegacyIfChanged(from snapshot: LegacyCredentialSnapshot) throws {
+        let current = readLegacySnapshotWithoutInteraction()
+        guard Self.legacyCredentialChanged(from: snapshot, to: current) else { return }
+        try restoreLegacyFallback(snapshot)
     }
 
     private func upsertSourceCredential(_ data: Data, service: String) throws {
@@ -320,6 +334,17 @@ final class ClaudeService {
 
     private func deleteSourceCredential(service: String) {
         _ = SecItemDelete(ClaudeCredentialQueries.sourceMutation(service: service) as CFDictionary)
+    }
+
+    private func readLegacySnapshotWithoutInteraction() -> LegacyCredentialSnapshot {
+        do {
+            if let data = try copyOptionalData(for: ClaudeCredentialQueries.source(allowsInteraction: false)) {
+                return .value(data)
+            }
+            return .absent
+        } catch {
+            return .unavailableWithoutInteraction
+        }
     }
 
     private func restoreManagedCredential(_ snapshot: Data?) throws {
@@ -402,12 +427,7 @@ final class ClaudeService {
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
         let canonicalPath = temporaryDirectory.resolvingSymlinksInPath().path.precomposedStringWithCanonicalMapping
         let scopedService = Self.scopedClaudeService(for: canonicalPath)
-        let legacySnapshot: Data?
-        do {
-            legacySnapshot = try copyOptionalData(for: ClaudeCredentialQueries.source(allowsInteraction: true))
-        } catch is KeychainStatusError {
-            throw ClaudeServiceError.loginCaptureFailed
-        }
+        let legacySnapshot = readLegacySnapshotWithoutInteraction()
         let managedSnapshot: Data?
         do {
             managedSnapshot = try copyOptionalData(for: ClaudeCredentialQueries.cacheRead())
@@ -416,19 +436,61 @@ final class ClaudeService {
         }
         do {
             try runInteractiveLogin(cliURL: cliURL, configDirectory: temporaryDirectory)
-            let scoped = try? copyData(for: ClaudeCredentialQueries.source(service: scopedService, allowsInteraction: true))
-            let legacy = try? copyData(for: ClaudeCredentialQueries.source(allowsInteraction: true))
-            guard let captured = scoped ?? legacy.flatMap({ $0 == legacySnapshot ? nil : $0 }) else {
+            let scoped: Data?
+            do {
+                scoped = try copyOptionalData(
+                    for: ClaudeCredentialQueries.source(service: scopedService, allowsInteraction: true)
+                )
+            } catch is KeychainStatusError {
+                throw ClaudeServiceError.loginCaptureFailed
+            }
+            let captured: Data?
+            if let scoped {
+                captured = scoped
+            } else {
+                let legacy = try? copyData(for: ClaudeCredentialQueries.source(allowsInteraction: true))
+                if Self.shouldUseLegacyFallback(snapshot: legacySnapshot, captured: legacy) {
+                    captured = legacy
+                } else {
+                    captured = nil
+                }
+            }
+            guard let captured else {
                 throw ClaudeServiceError.loginCaptureFailed
             }
             let credential = try Self.parseManagedCredential(from: captured)
             try storeManagedCredential(credential)
-            try restoreLoginKeychain(legacySnapshot: legacySnapshot, scopedService: scopedService)
+            deleteSourceCredential(service: scopedService)
+            try restoreLegacyIfChanged(from: legacySnapshot)
             return credential
         } catch {
-            try? restoreLoginKeychain(legacySnapshot: legacySnapshot, scopedService: scopedService)
+            deleteSourceCredential(service: scopedService)
+            try? restoreLegacyIfChanged(from: legacySnapshot)
             try? restoreManagedCredential(managedSnapshot)
             throw error
+        }
+    }
+
+    static func shouldUseLegacyFallback(snapshot: LegacyCredentialSnapshot, captured: Data?) -> Bool {
+        guard let captured else { return false }
+        switch snapshot {
+        case .value(let prior): return captured != prior
+        case .absent: return true
+        case .unavailableWithoutInteraction: return false
+        }
+    }
+
+    static func legacyCredentialChanged(
+        from snapshot: LegacyCredentialSnapshot,
+        to current: LegacyCredentialSnapshot
+    ) -> Bool {
+        switch (snapshot, current) {
+        case (.value(let prior), .value(let latest)):
+            return prior != latest
+        case (.value, .absent), (.absent, .value):
+            return true
+        case (.absent, .absent), (_, .unavailableWithoutInteraction), (.unavailableWithoutInteraction, _):
+            return false
         }
     }
 

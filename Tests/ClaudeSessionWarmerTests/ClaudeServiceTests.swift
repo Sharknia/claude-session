@@ -68,6 +68,30 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertFalse(credential.needsRefresh(now: Date(timeIntervalSince1970: 1_700_000_000)))
     }
 
+    func testLegacyFallbackNeverUsesUnverifiedPreLoginCredential() {
+        let original = Data("original".utf8)
+        let changed = Data("changed".utf8)
+
+        XCTAssertTrue(ClaudeService.shouldUseLegacyFallback(snapshot: .value(original), captured: changed))
+        XCTAssertFalse(ClaudeService.shouldUseLegacyFallback(snapshot: .value(original), captured: original))
+        XCTAssertTrue(ClaudeService.shouldUseLegacyFallback(snapshot: .absent, captured: changed))
+        XCTAssertFalse(ClaudeService.shouldUseLegacyFallback(snapshot: .unavailableWithoutInteraction, captured: changed))
+        XCTAssertFalse(ClaudeService.shouldUseLegacyFallback(snapshot: .absent, captured: nil))
+    }
+
+    func testLegacyRestoreOnlyRunsForVerifiedChanges() {
+        let original = Data("original".utf8)
+        let changed = Data("changed".utf8)
+
+        XCTAssertFalse(ClaudeService.legacyCredentialChanged(from: .value(original), to: .value(original)))
+        XCTAssertTrue(ClaudeService.legacyCredentialChanged(from: .value(original), to: .value(changed)))
+        XCTAssertTrue(ClaudeService.legacyCredentialChanged(from: .value(original), to: .absent))
+        XCTAssertTrue(ClaudeService.legacyCredentialChanged(from: .absent, to: .value(changed)))
+        XCTAssertFalse(ClaudeService.legacyCredentialChanged(from: .absent, to: .absent))
+        XCTAssertFalse(ClaudeService.legacyCredentialChanged(from: .value(original), to: .unavailableWithoutInteraction))
+        XCTAssertFalse(ClaudeService.legacyCredentialChanged(from: .unavailableWithoutInteraction, to: .value(changed)))
+    }
+
     func testRefreshRequestAndMergePreserveRotatedCredentialFields() throws {
         let request = ClaudeService.makeRefreshRequest(refreshToken: "refresh-value")
         XCTAssertEqual(request.httpMethod, "POST")
