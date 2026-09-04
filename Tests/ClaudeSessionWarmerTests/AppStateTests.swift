@@ -3,6 +3,23 @@ import XCTest
 @testable import ClaudeSessionWarmer
 
 final class AppStateTests: XCTestCase {
+    func testCurrentFiveHourRangeUsesFixedTwentyFourHourFormat() throws {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Seoul"))
+        let resetsAt = try XCTUnwrap(calendar.date(from: DateComponents(
+            year: 2026,
+            month: 9,
+            day: 4,
+            hour: 19,
+            minute: 20
+        )))
+
+        XCTAssertEqual(
+            MenuDateFormatting.currentFiveHourRange(endingAt: resetsAt, calendar: calendar),
+            "14:20–19:20"
+        )
+    }
+
     @MainActor
     func testBatchSettingsArePersistedAndReloaded() {
         withStore { store in

@@ -41,6 +41,12 @@ swift test
 ./scripts/build-dmg.sh
 ```
 
+반복 개발 중 앱 전용 Keychain 승인을 다시 묻지 않게 하려면 동일한 Apple Development 인증서로 서명합니다.
+
+```bash
+CODESIGN_IDENTITY="Apple Development: ..." ./scripts/build-dmg.sh
+```
+
 결과물은 `dist/ClaudeSessionWarmer-0.1.0-dev.dmg`입니다.
 
 ## 내부 배포 DMG

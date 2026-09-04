@@ -9,6 +9,8 @@ readonly APP_NAME="ClaudeSessionWarmer"
 readonly APP_BUNDLE="$DIST_DIR/$APP_NAME.app"
 readonly APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 readonly INFO_PLIST_SOURCE="$PROJECT_DIR/packaging/Info.plist"
+readonly APP_ICON_SOURCE="$PROJECT_DIR/packaging/AppIcon.icns"
+readonly MENU_BAR_ICON_SOURCE="$PROJECT_DIR/packaging/MenuBarTemplate.pdf"
 readonly RELEASE_BUILD="${RELEASE_BUILD:-0}"
 if [[ "$RELEASE_BUILD" == "1" ]]; then
     : "${CODESIGN_IDENTITY:?RELEASE_BUILD=1에는 CODESIGN_IDENTITY가 필요합니다.}"
@@ -19,8 +21,8 @@ else
 fi
 readonly VOLUME_NAME="Claude Session Warmer 0.1.0"
 
-if [[ ! -f "$PROJECT_DIR/Package.swift" || ! -f "$INFO_PLIST_SOURCE" ]]; then
-    echo "오류: 프로젝트 루트 또는 packaging/Info.plist를 찾을 수 없습니다." >&2
+if [[ ! -f "$PROJECT_DIR/Package.swift" || ! -f "$INFO_PLIST_SOURCE" || ! -f "$APP_ICON_SOURCE" || ! -f "$MENU_BAR_ICON_SOURCE" ]]; then
+    echo "오류: 프로젝트 루트 또는 필수 packaging 파일을 찾을 수 없습니다." >&2
     exit 1
 fi
 
@@ -44,6 +46,8 @@ echo "[2/5] 앱 번들 생성"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$INFO_PLIST_SOURCE" "$APP_BUNDLE/Contents/Info.plist"
 cp "$BUILT_EXECUTABLE" "$APP_EXECUTABLE"
+cp "$APP_ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
+cp "$MENU_BAR_ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/MenuBarTemplate.pdf"
 chmod 755 "$APP_EXECUTABLE"
 
 if [[ "$RELEASE_BUILD" == "1" ]]; then
@@ -54,6 +58,9 @@ if [[ "$RELEASE_BUILD" == "1" ]]; then
         --timestamp \
         --sign "$CODESIGN_IDENTITY" \
         "$APP_BUNDLE"
+elif [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    echo "[3/5] 개발용 안정 서명: $CODESIGN_IDENTITY"
+    codesign --force --sign "$CODESIGN_IDENTITY" "$APP_BUNDLE"
 else
     echo "[3/5] CODESIGN_IDENTITY 없음: 로컬 검증용 ad-hoc 서명"
     codesign --force --sign - "$APP_BUNDLE"
@@ -87,6 +94,8 @@ fi
 
 if [[ "$RELEASE_BUILD" == "1" ]]; then
     echo "배포용 서명·공증 DMG 완료: $DMG_PATH"
+elif [[ -n "${CODESIGN_IDENTITY:-}" ]]; then
+    echo "로컬 검증용 안정 서명 DMG 완료: $DMG_PATH"
 else
     echo "로컬 검증용 ad-hoc DMG 완료: $DMG_PATH"
 fi

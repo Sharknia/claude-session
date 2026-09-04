@@ -6,8 +6,10 @@
     <string>ko</string>
     <key>CFBundleDisplayName</key>
     <string>Claude Session Warmer</string>
-    <key>CFBundleExecutable</key>
-    <string>ClaudeSessionWarmer</string>
+	<key>CFBundleExecutable</key>
+	<string>ClaudeSessionWarmer</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon.icns</string>
     <key>CFBundleIdentifier</key>
     <string>com.sharknia.ClaudeSessionWarmer</string>
     <key>CFBundleInfoDictionaryVersion</key>

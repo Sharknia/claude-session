@@ -1,6 +1,21 @@
 import AppKit
 import SwiftUI
 
+enum MenuDateFormatting {
+    static func currentFiveHourRange(
+        endingAt resetsAt: Date,
+        calendar: Calendar = .autoupdatingCurrent
+    ) -> String {
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.timeZone = calendar.timeZone
+        formatter.dateFormat = "HH:mm"
+        let startsAt = resetsAt.addingTimeInterval(-ScheduleEngine.quotaWindowDuration)
+        return "\(formatter.string(from: startsAt))–\(formatter.string(from: resetsAt))"
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var state: AppState
     @State private var draftTime: Date
@@ -80,9 +95,8 @@ struct MenuContent: View {
                 Divider()
                     .padding(.vertical, 2)
                 scheduleColumn(
-                    label: "리셋",
-                    value: (state.currentQuota?.resetsAt ?? state.cycle.nextResetAt)
-                        .map(smartFormatted) ?? "없음"
+                    label: "현재 5시간",
+                    value: currentFiveHourValue
                 )
             }
             .padding(.vertical, 10)
@@ -261,6 +275,12 @@ struct MenuContent: View {
         guard quota.active else { return "활성 5시간 창" }
         guard let used = quota.usedPercent else { return "사용량 정보 없음" }
         return String(format: "사용 · %.0f%% 남음", max(0, 100 - used))
+    }
+
+    private var currentFiveHourValue: String {
+        guard let quota = state.currentQuota else { return "확인 필요" }
+        guard quota.active, let resetsAt = quota.resetsAt else { return "없음" }
+        return MenuDateFormatting.currentFiveHourRange(endingAt: resetsAt)
     }
 
     private func saveDraft() {
