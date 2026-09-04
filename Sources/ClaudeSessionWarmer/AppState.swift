@@ -29,6 +29,7 @@ final class AppState: ObservableObject {
         cycle = savedCycle
         status = savedCycle.lastRecord?.status ?? .idle
         statusMessage = savedCycle.lastRecord?.message ?? "대기 중"
+        syncLaunchAtLoginStatus()
 
         if startScheduler {
             scheduleNext()
@@ -77,8 +78,16 @@ final class AppState: ObservableObject {
             } else {
                 try SMAppService.mainApp.unregister()
             }
-            settings.launchAtLogin = enabled
+            let serviceStatus = SMAppService.mainApp.status
+            settings.launchAtLogin = serviceStatus == .enabled
             store.saveSettings(settings)
+            if enabled, serviceStatus == .requiresApproval {
+                record(.failed, message: "시스템 설정의 로그인 항목에서 앱을 허용해 주세요.")
+                store.saveDailyCycle(cycle)
+            } else if enabled, serviceStatus != .enabled {
+                record(.failed, message: "로그인 실행을 활성화하지 못했습니다.")
+                store.saveDailyCycle(cycle)
+            }
         } catch {
             record(.failed, message: "로그인 실행 설정 실패: \(error.localizedDescription)")
             store.saveDailyCycle(cycle)
@@ -192,6 +201,14 @@ final class AppState: ObservableObject {
         scheduleNext()
     }
 
+    private func syncLaunchAtLoginStatus() {
+        let enabled = SMAppService.mainApp.status == .enabled
+        if settings.launchAtLogin != enabled {
+            settings.launchAtLogin = enabled
+            store.saveSettings(settings)
+        }
+    }
+
     private func saveCycleAndReschedule() {
         store.saveDailyCycle(cycle)
         scheduleNext()
@@ -278,7 +295,7 @@ final class AppState: ObservableObject {
                     complete(event, quota: inspection.quota, status: .satisfied, message: "이미 열린 창을 확인했습니다.")
                 } else if inspection.quota.active {
                     throw AppStateError.quotaNotReset
-                } else if cycle.lastWarmupTargetAt == event.targetAt {
+                } else if shouldSuppressWarmup(for: event.targetAt, at: Date()) {
                     throw AppStateError.quotaNotActivated
                 } else {
                     cycle.lastWarmupTargetAt = event.targetAt
@@ -395,16 +412,27 @@ final class AppState: ObservableObject {
 
     func reconcileMissedWindows(at now: Date) {
         let todayKey = engine.dayKey(for: now)
-        if cycle.dayKey != todayKey,
-           let firstTarget = engine.firstWarmup(on: now, settings: settings),
-           firstTarget < now {
-            cycle = engine.newCycle(startingAt: firstTarget)
-            advanceAfterUnresolvedWindow(
-                targetAt: firstTarget,
-                windowNumber: 1,
-                status: .missed,
-                message: "첫 워밍 시각을 놓쳐 해당 창은 따라잡지 않습니다."
-            )
+        if let firstTarget = engine.firstWarmup(on: now, settings: settings), firstTarget < now {
+            if cycle.dayKey == todayKey,
+               cycle.handledWindows == 0,
+               cycle.skipNext,
+               cycle.nextResetAt == nil {
+                advanceAfterUnresolvedWindow(
+                    targetAt: firstTarget,
+                    windowNumber: 1,
+                    status: .skipped,
+                    message: "다음 워밍 1회 건너뜀",
+                    consumingSkip: true
+                )
+            } else if cycle.dayKey != todayKey {
+                cycle = engine.newCycle(startingAt: firstTarget)
+                advanceAfterUnresolvedWindow(
+                    targetAt: firstTarget,
+                    windowNumber: 1,
+                    status: .missed,
+                    message: "첫 워밍 시각을 놓쳐 해당 창은 따라잡지 않습니다."
+                )
+            }
         }
 
         while let resetAt = cycle.nextResetAt,
@@ -445,6 +473,13 @@ final class AppState: ObservableObject {
     func hasRecentWarmupAttempt(at now: Date) -> Bool {
         guard let target = cycle.lastWarmupTargetAt else { return false }
         return (0...ScheduleEngine.windowTolerance).contains(now.timeIntervalSince(target))
+    }
+
+    func shouldSuppressWarmup(for targetAt: Date, at now: Date) -> Bool {
+        guard let lastTarget = cycle.lastWarmupTargetAt else { return false }
+        return lastTarget == targetAt
+            || abs(targetAt.timeIntervalSince(lastTarget)) <= ScheduleEngine.windowTolerance
+            || (0...ScheduleEngine.windowTolerance).contains(now.timeIntervalSince(lastTarget))
     }
 
     private func record(_ newStatus: WarmupStatus, message: String) {

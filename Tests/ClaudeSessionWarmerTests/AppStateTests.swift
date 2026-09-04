@@ -226,6 +226,62 @@ final class AppStateTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testRestartConsumesPendingFirstSkipOnlyAfterTarget() {
+        withStore { store in
+            let calendar = seoulCalendar()
+            let engine = ScheduleEngine(calendar: calendar)
+            let firstTarget = date(2026, 9, 4, 6, calendar: calendar)
+            let todayKey = engine.dayKey(for: firstTarget)
+            store.saveSettings(ScheduleSettings(
+                firstWarmupMinutes: 6 * 60,
+                weekdays: Set(1...7),
+                excludeKoreanHolidays: false
+            ))
+            store.saveDailyCycle(DailyCycle(dayKey: todayKey, skipNext: true))
+            let state = AppState(store: store, engine: engine, startScheduler: false)
+
+            state.reconcileMissedWindows(at: firstTarget.addingTimeInterval(-1))
+            XCTAssertEqual(state.cycle.handledWindows, 0)
+            XCTAssertTrue(state.cycle.skipNext)
+            XCTAssertNil(state.cycle.nextResetAt)
+
+            state.reconcileMissedWindows(at: firstTarget.addingTimeInterval(2 * 60))
+            XCTAssertEqual(state.cycle.handledWindows, 1)
+            XCTAssertFalse(state.cycle.skipNext)
+            XCTAssertEqual(state.cycle.lastRecord?.status, .skipped)
+            XCTAssertEqual(
+                state.cycle.nextResetAt,
+                firstTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
+            )
+        }
+    }
+
+    @MainActor
+    func testScheduledWarmupSuppressesRecentManualMarker() {
+        withStore { store in
+            let target = Date(timeIntervalSince1970: 1_800_000_000)
+            store.saveDailyCycle(DailyCycle(
+                lastWarmupTargetAt: target.addingTimeInterval(-60)
+            ))
+            let state = AppState(store: store, startScheduler: false)
+
+            XCTAssertTrue(state.shouldSuppressWarmup(for: target, at: target))
+            XCTAssertTrue(
+                state.shouldSuppressWarmup(
+                    for: target,
+                    at: target.addingTimeInterval(ScheduleEngine.windowTolerance)
+                )
+            )
+            XCTAssertFalse(
+                state.shouldSuppressWarmup(
+                    for: target.addingTimeInterval(600),
+                    at: target.addingTimeInterval(181)
+                )
+            )
+        }
+    }
+
     private func withStore(_ body: (SettingsStore) -> Void) {
         let suiteName = "AppStateTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
