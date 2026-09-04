@@ -1,4 +1,5 @@
 import XCTest
+import LocalAuthentication
 @testable import ClaudeSessionWarmer
 
 final class ClaudeServiceTests: XCTestCase {
@@ -34,8 +35,45 @@ final class ClaudeServiceTests: XCTestCase {
     }
 
     func testCredentialParserAcceptsNestedClaudeAIOAuthToken() throws {
-        let data = Data("{\"claudeAiOauth\":{\"accessToken\":\"not-a-real-token\"}}".utf8)
+        let data = Data("{\"claudeAiOauth\":{\"accessToken\":\"not-a-real-token\",\"refreshToken\":\"must-not-copy\"}}".utf8)
         XCTAssertEqual(try ClaudeService.parseAccessToken(from: data), "not-a-real-token")
+    }
+
+    func testCredentialQueriesUseSourceWithoutUIAndAppOnlyCache() {
+        let manualSource = ClaudeCredentialQueries.source(allowsInteraction: true)
+        let automaticSource = ClaudeCredentialQueries.source(allowsInteraction: false)
+        let cache = ClaudeCredentialQueries.cacheAddPayload(token: "test-access-token")
+
+        XCTAssertEqual(manualSource[kSecAttrService] as? String, ClaudeCredentialQueries.sourceService)
+        XCTAssertNil(manualSource[kSecUseAuthenticationContext])
+        XCTAssertTrue((automaticSource[kSecUseAuthenticationContext] as? LAContext)?.interactionNotAllowed == true)
+        XCTAssertEqual(cache[kSecAttrService] as? String, ClaudeCredentialQueries.cacheService)
+        XCTAssertEqual(cache[kSecAttrAccount] as? String, ClaudeCredentialQueries.cacheAccount)
+        XCTAssertEqual(cache[kSecAttrAccessible] as? String, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+    }
+
+    func testManualCredentialErrorsUseUserFacingCategories() {
+        XCTAssertEqual(
+            ClaudeService.manualCredentialError(for: errSecItemNotFound),
+            .credentialsUnavailable
+        )
+        XCTAssertEqual(
+            ClaudeService.manualCredentialError(for: errSecUserCanceled),
+            .credentialsRequireManualRefresh
+        )
+        XCTAssertEqual(
+            ClaudeService.manualCredentialError(for: errSecAuthFailed),
+            .credentialsRequireManualRefresh
+        )
+    }
+
+    func testCachePayloadContainsOnlyAccessToken() throws {
+        let payload = ClaudeService.cachePayload(for: "test-access-token")
+        XCTAssertEqual(try ClaudeService.parseCachedAccessToken(payload), "test-access-token")
+        XCTAssertFalse(String(decoding: payload, as: UTF8.self).contains("refresh"))
+        XCTAssertThrowsError(try ClaudeService.parseCachedAccessToken(Data())) { error in
+            XCTAssertEqual(error as? ClaudeServiceError, .credentialsRequireManualRefresh)
+        }
     }
 
     func testQuotaHTTPStatusErrorsAreDistinguished() {

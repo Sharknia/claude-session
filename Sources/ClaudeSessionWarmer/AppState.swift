@@ -46,36 +46,78 @@ final class AppState: ObservableObject {
         cycle.dayKey == engine.dayKey(for: Date()) ? cycle.handledWindows : 0
     }
 
-    func updateFirstWarmupTime(_ date: Date) {
-        let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: date)
-        updateFirstWarmup(minutes: (components.hour ?? 0) * 60 + (components.minute ?? 0))
-    }
-
-    func updateFirstWarmup(minutes: Int) {
-        settings.firstWarmupMinutes = min(max(minutes, 0), 23 * 60 + 59)
-        saveSettingsAndReschedule()
-    }
-
-    func toggleWeekday(_ weekday: Int) {
-        guard (1...7).contains(weekday) else { return }
-        if settings.weekdays.contains(weekday) {
-            settings.weekdays.remove(weekday)
-        } else {
-            settings.weekdays.insert(weekday)
+    @discardableResult
+    func applySettings(
+        firstWarmupDate: Date,
+        weekdays: Set<Int>,
+        excludeKoreanHolidays: Bool,
+        launchAtLogin: Bool
+    ) -> Bool {
+        guard !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }) else {
+            return false
         }
-        saveSettingsAndReschedule()
+        let components = Calendar.autoupdatingCurrent.dateComponents(
+            [.hour, .minute],
+            from: firstWarmupDate
+        )
+        settings.firstWarmupMinutes = min(
+            max((components.hour ?? 0) * 60 + (components.minute ?? 0), 0),
+            23 * 60 + 59
+        )
+        settings.weekdays = weekdays
+        settings.excludeKoreanHolidays = excludeKoreanHolidays
+        applyLaunchAtLogin(launchAtLogin)
+        store.saveSettings(settings)
+        scheduleNext()
+        return true
     }
 
-    func setExcludeKoreanHolidays(_ enabled: Bool) {
-        settings.excludeKoreanHolidays = enabled
-        saveSettingsAndReschedule()
-    }
+    @discardableResult
+    func prepareAndApplySettings(
+        firstWarmupDate: Date,
+        weekdays: Set<Int>,
+        excludeKoreanHolidays: Bool,
+        launchAtLogin: Bool
+    ) async -> Bool {
+        guard !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }), !isWorking else {
+            return false
+        }
 
-    func setLaunchAtLogin(_ enabled: Bool) {
+        isWorking = true
+        status = .checking
+        statusMessage = "자동 실행 권한 준비 중"
+        defer { isWorking = false }
+
         do {
-            if enabled {
+            let inspection = try await Self.inspectForCredentialPreparation()
+            currentQuota = inspection.quota
+        } catch {
+            record(.failed, message: "설정 저장 실패: \(error.localizedDescription)")
+            store.saveDailyCycle(cycle)
+            return false
+        }
+
+        let applied = applySettings(
+            firstWarmupDate: firstWarmupDate,
+            weekdays: weekdays,
+            excludeKoreanHolidays: excludeKoreanHolidays,
+            launchAtLogin: launchAtLogin
+        )
+        let loginSettingApplied = settings.launchAtLogin == launchAtLogin
+        if applied, loginSettingApplied {
+            status = .idle
+            statusMessage = "설정과 자동 실행 권한을 저장했습니다."
+        }
+        return applied && loginSettingApplied
+    }
+
+    private func applyLaunchAtLogin(_ enabled: Bool) {
+        do {
+            let currentStatus = SMAppService.mainApp.status
+            if enabled, currentStatus == .notRegistered {
                 try SMAppService.mainApp.register()
-            } else {
+            } else if !enabled,
+                      currentStatus == .enabled || currentStatus == .requiresApproval {
                 try SMAppService.mainApp.unregister()
             }
             let serviceStatus = SMAppService.mainApp.status
@@ -118,7 +160,7 @@ final class AppState: ObservableObject {
 
         Task {
             do {
-                let inspection = try await Self.inspectClaude()
+                let inspection = try await Self.inspectClaude(allowsCredentialPrompt: true)
                 currentQuota = inspection.quota
                 status = inspection.quota.active ? .satisfied : .idle
                 statusMessage = inspection.quota.active ? "활성 사용량 창을 확인했습니다." : "활성 사용량 창이 없습니다."
@@ -148,7 +190,7 @@ final class AppState: ObservableObject {
         Task {
             var attemptedTarget: Date?
             do {
-                var inspection = try await Self.inspectClaude()
+                var inspection = try await Self.inspectClaude(allowsCredentialPrompt: true)
                 var performedWarmup = false
                 if !inspection.quota.active {
                     guard !hasRecentWarmupAttempt(at: now) else {
@@ -162,7 +204,7 @@ final class AppState: ObservableObject {
                     statusMessage = "Claude 워밍 중"
                     try await Self.runWarmup(cliURL: inspection.cliURL)
                     performedWarmup = true
-                    inspection = try await Self.inspectClaude()
+                    inspection = try await Self.inspectClaude(allowsCredentialPrompt: true)
                 }
                 guard inspection.quota.active, inspection.quota.resetsAt != nil else {
                     throw AppStateError.quotaNotActivated
@@ -194,11 +236,6 @@ final class AppState: ObservableObject {
             }
             isWorking = false
         }
-    }
-
-    private func saveSettingsAndReschedule() {
-        store.saveSettings(settings)
-        scheduleNext()
     }
 
     private func syncLaunchAtLoginStatus() {
@@ -290,7 +327,7 @@ final class AppState: ObservableObject {
 
         Task {
             do {
-                var inspection = try await Self.inspectClaude()
+                var inspection = try await Self.inspectClaude(allowsCredentialPrompt: false)
                 if isFreshWindow(inspection.quota, for: event) {
                     complete(event, quota: inspection.quota, status: .satisfied, message: "이미 열린 창을 확인했습니다.")
                 } else if inspection.quota.active {
@@ -303,7 +340,7 @@ final class AppState: ObservableObject {
                     status = .warming
                     statusMessage = "\(event.windowNumber)번째 창 워밍 중"
                     try await Self.runWarmup(cliURL: inspection.cliURL)
-                    inspection = try await Self.inspectClaude()
+                    inspection = try await Self.inspectClaude(allowsCredentialPrompt: false)
                     guard isFreshWindow(inspection.quota, for: event) else {
                         throw AppStateError.quotaNotActivated
                     }
@@ -500,12 +537,21 @@ final class AppState: ObservableObject {
         }
     }
 
-    private static func inspectClaude() async throws -> Inspection {
+    private static func inspectForCredentialPreparation() async throws -> Inspection {
+        do {
+            return try await inspectClaude(allowsCredentialPrompt: false)
+        } catch let error as ClaudeServiceError
+            where error == .credentialsRequireManualRefresh || error == .quotaUnauthorized {
+            return try await inspectClaude(allowsCredentialPrompt: true)
+        }
+    }
+
+    private static func inspectClaude(allowsCredentialPrompt: Bool) async throws -> Inspection {
         try await Task.detached(priority: .utility) {
             let service = ClaudeService()
             let cliURL = try service.locateCLI()
             _ = try service.checkAuth(cliURL: cliURL)
-            let token = try service.readAccessTokenFromKeychain()
+            let token = try service.readAccessToken(allowsInteraction: allowsCredentialPrompt)
             let quota = try await service.fetchQuota(accessToken: token)
             return Inspection(cliURL: cliURL, quota: quota)
         }.value

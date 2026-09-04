@@ -1,5 +1,6 @@
 import Foundation
 import Security
+import LocalAuthentication
 import Darwin
 
 enum ClaudeServiceError: LocalizedError, Equatable {
@@ -7,6 +8,7 @@ enum ClaudeServiceError: LocalizedError, Equatable {
     case invalidAuthStatus
     case apiBillingEnvironment
     case credentialsUnavailable
+    case credentialsRequireManualRefresh
     case invalidUsageResponse
     case quotaUnauthorized
     case quotaRateLimited
@@ -21,8 +23,9 @@ enum ClaudeServiceError: LocalizedError, Equatable {
         case .invalidAuthStatus: return "claude.ai 구독 인증 상태를 확인할 수 없습니다."
         case .apiBillingEnvironment: return "API 과금 환경에서는 워밍을 실행할 수 없습니다."
         case .credentialsUnavailable: return "Claude Code 인증 정보를 Keychain에서 읽을 수 없습니다."
+        case .credentialsRequireManualRefresh: return "Mac 잠금을 해제한 뒤 메뉴바에서 새로고침해 Claude Code 인증을 승인하세요."
         case .invalidUsageResponse: return "사용량 응답 형식이 올바르지 않습니다."
-        case .quotaUnauthorized: return "Claude 사용량 조회 인증이 거부되었습니다."
+        case .quotaUnauthorized: return "Claude 인증이 만료됐을 수 있습니다. Mac 잠금을 해제한 뒤 새로고침해 주세요."
         case .quotaRateLimited: return "Claude 사용량 조회 요청이 제한되었습니다."
         case .quotaUnavailable: return "Claude 사용량 조회 서비스를 사용할 수 없습니다."
         case .warmupNotStarted: return "Claude 워밍 프로세스를 시작하지 못했습니다."
@@ -160,6 +163,68 @@ struct ClaudeWarmupCommand: Equatable {
     }
 }
 
+enum ClaudeCredentialQueries {
+    static let sourceService = "Claude Code-credentials"
+    static let cacheService = "com.sharknia.ClaudeSessionWarmer.oauth"
+    static let cacheAccount = "claude-access-token"
+
+    static func source(allowsInteraction: Bool) -> [CFString: Any] {
+        var query: [CFString: Any] = [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: sourceService,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne
+        ]
+        if !allowsInteraction {
+            query[kSecUseAuthenticationContext] = nonInteractiveContext()
+        }
+        return query
+    }
+
+    static func cacheRead() -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: cacheService,
+            kSecAttrAccount: cacheAccount,
+            kSecReturnData: true,
+            kSecMatchLimit: kSecMatchLimitOne,
+            kSecUseAuthenticationContext: nonInteractiveContext()
+        ]
+    }
+
+    static func cacheUpdateQuery() -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: cacheService,
+            kSecAttrAccount: cacheAccount
+        ]
+    }
+
+    static func cacheUpdateAttributes(token: String) -> [CFString: Any] {
+        [kSecValueData: ClaudeService.cachePayload(for: token)]
+    }
+
+    static func cacheAddPayload(token: String) -> [CFString: Any] {
+        [
+            kSecClass: kSecClassGenericPassword,
+            kSecAttrService: cacheService,
+            kSecAttrAccount: cacheAccount,
+            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
+            kSecValueData: ClaudeService.cachePayload(for: token)
+        ]
+    }
+
+    private static func nonInteractiveContext() -> LAContext {
+        let context = LAContext()
+        context.interactionNotAllowed = true
+        return context
+    }
+}
+
+private struct KeychainStatusError: Error {
+    let status: OSStatus
+}
+
 final class ClaudeService {
     private static let knownCLIPaths = [
         "~/.local/bin/claude",
@@ -194,20 +259,57 @@ final class ClaudeService {
         return try ClaudeAuthStatus.parse(result.stdout)
     }
 
-    /// 읽기 전용으로 기존 Claude Code 항목만 조회한다. 토큰을 앱 저장소나 로그에 쓰지 않는다.
-    func readAccessTokenFromKeychain() throws -> String {
-        let query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: "Claude Code-credentials",
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else {
+    /// 자동 실행은 인증 UI를 띄우지 않고 source Keychain 뒤 앱 전용 cache를 조회한다.
+    func readAccessToken(allowsInteraction: Bool) throws -> String {
+        if allowsInteraction {
+            do {
+                let token = try Self.parseAccessToken(
+                    from: try copyData(for: ClaudeCredentialQueries.source(allowsInteraction: true))
+                )
+                try storeCachedAccessToken(token)
+                return token
+            } catch let error as KeychainStatusError {
+                throw Self.manualCredentialError(for: error.status)
+            }
+        }
+
+        do {
+            let token = try Self.parseAccessToken(from: try copyData(for: ClaudeCredentialQueries.source(allowsInteraction: false)))
+            try storeCachedAccessToken(token)
+            return token
+        } catch is KeychainStatusError {
+            return try readCachedAccessTokenOrRequireRefresh()
+        } catch {
             throw ClaudeServiceError.credentialsUnavailable
         }
-        return try Self.parseAccessToken(from: data)
+    }
+
+    private func readCachedAccessTokenOrRequireRefresh() throws -> String {
+        do {
+            return try Self.parseCachedAccessToken(try copyData(for: ClaudeCredentialQueries.cacheRead()))
+        } catch {
+            throw ClaudeServiceError.credentialsRequireManualRefresh
+        }
+    }
+
+    private func storeCachedAccessToken(_ token: String) throws {
+        let status = SecItemUpdate(
+            ClaudeCredentialQueries.cacheUpdateQuery() as CFDictionary,
+            ClaudeCredentialQueries.cacheUpdateAttributes(token: token) as CFDictionary
+        )
+        if status == errSecItemNotFound {
+            let addStatus = SecItemAdd(ClaudeCredentialQueries.cacheAddPayload(token: token) as CFDictionary, nil)
+            guard addStatus == errSecSuccess else { throw ClaudeServiceError.credentialsUnavailable }
+        } else if status != errSecSuccess {
+            throw ClaudeServiceError.credentialsUnavailable
+        }
+    }
+
+    private func copyData(for query: [CFString: Any]) throws -> Data {
+        var item: CFTypeRef?
+        let status = SecItemCopyMatching(query as CFDictionary, &item)
+        guard status == errSecSuccess, let data = item as? Data else { throw KeychainStatusError(status: status) }
+        return data
     }
 
     static func parseAccessToken(from data: Data) throws -> String {
@@ -222,6 +324,28 @@ final class ClaudeService {
             throw ClaudeServiceError.credentialsUnavailable
         }
         return accessToken
+    }
+
+    static func manualCredentialError(for status: OSStatus) -> ClaudeServiceError {
+        switch status {
+        case errSecItemNotFound:
+            return .credentialsUnavailable
+        case errSecUserCanceled, errSecAuthFailed, errSecInteractionNotAllowed:
+            return .credentialsRequireManualRefresh
+        default:
+            return .credentialsUnavailable
+        }
+    }
+
+    static func cachePayload(for accessToken: String) -> Data {
+        Data(accessToken.utf8)
+    }
+
+    static func parseCachedAccessToken(_ data: Data) throws -> String {
+        guard let token = String(data: data, encoding: .utf8), !token.isEmpty else {
+            throw ClaudeServiceError.credentialsRequireManualRefresh
+        }
+        return token
     }
 
     func fetchQuota(accessToken: String, session: URLSession = .shared) async throws -> QuotaWindow {

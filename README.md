@@ -17,7 +17,7 @@
 - Claude Code 설치
 - Claude Code에서 `claude.ai` 구독 계정으로 로그인
 
-앱은 Claude Code의 기존 인증을 사용하며 토큰을 별도로 저장하지 않습니다.
+저장 시 access token만 이 Mac의 앱 전용 Keychain cache에 보관하며 refresh token은 저장하지 않습니다. 자동 예약은 UI 없이 cache를 사용하고, 401·만료 시 잠금 해제 후 `새로고침`이 필요합니다.
 
 ## 개발 검증
 
@@ -49,9 +49,9 @@ NOTARY_PROFILE="claude-session-notary" \
 ## 설치와 첫 실행
 
 1. DMG에서 `ClaudeSessionWarmer.app`을 Applications 폴더로 복사해 실행합니다.
-2. 초기 설정에서 메뉴바의 `새로고침`을 눌러 CLI·인증·사용량을 확인합니다.
-3. 이때 표시되는 Claude Code Keychain 읽기 요청을 승인합니다.
-4. 첫 워밍 시각, 요일, 공휴일 제외 및 로그인 실행 여부를 설정합니다.
+2. 첫 워밍 시각, 요일, 공휴일 제외 및 로그인 실행 여부를 draft로 설정합니다.
+3. `저장`을 눌러 예약을 적용하고, 필요하면 Claude Code Keychain 읽기 요청을 승인합니다.
+4. `새로고침`으로 CLI·인증·사용량을 확인합니다.
 
 ## 현재 상태
 

@@ -4,18 +4,48 @@ import XCTest
 
 final class AppStateTests: XCTestCase {
     @MainActor
-    func testSettingsChangesArePersisted() {
+    func testBatchSettingsArePersistedAndReloaded() {
         withStore { store in
             let state = AppState(store: store, startScheduler: false)
+            let date = Calendar.autoupdatingCurrent.date(
+                bySettingHour: 8,
+                minute: 20,
+                second: 0,
+                of: Date()
+            )!
 
-            state.updateFirstWarmup(minutes: 8 * 60 + 20)
-            state.toggleWeekday(2)
-            state.setExcludeKoreanHolidays(false)
+            XCTAssertTrue(state.applySettings(
+                firstWarmupDate: date,
+                weekdays: [1, 3, 7],
+                excludeKoreanHolidays: false,
+                launchAtLogin: false
+            ))
 
             let saved = store.loadSettings()
             XCTAssertEqual(saved.firstWarmupMinutes, 8 * 60 + 20)
-            XCTAssertFalse(saved.weekdays.contains(2))
+            XCTAssertEqual(saved.weekdays, [1, 3, 7])
             XCTAssertFalse(saved.excludeKoreanHolidays)
+
+            let reloaded = AppState(store: store, startScheduler: false)
+            XCTAssertEqual(reloaded.settings, saved)
+        }
+    }
+
+    @MainActor
+    func testBatchSettingsRejectEmptyWeekdaysWithoutSaving() {
+        withStore { store in
+            let state = AppState(store: store, startScheduler: false)
+            let original = store.loadSettings()
+
+            XCTAssertFalse(state.applySettings(
+                firstWarmupDate: Date(),
+                weekdays: [],
+                excludeKoreanHolidays: false,
+                launchAtLogin: false
+            ))
+
+            XCTAssertEqual(store.loadSettings(), original)
+            XCTAssertEqual(state.settings, original)
         }
     }
 

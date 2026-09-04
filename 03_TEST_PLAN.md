@@ -69,8 +69,8 @@
 ### TC-AUTH-001 — CLI·claude.ai 인증·Keychain (P0, Integration+macOS)
 
 - 참조: `REQ-008`; `FLOW-001`, `FLOW-007`
-- 실행: CLI 미설치, 경로 변경, 미인증/만료, Keychain 최초 허용/거부, 재인증을 확인한다.
-- 기대: 원인을 구분해 `인증 필요` 또는 오류로 표시하고 준비 전에는 호출하지 않는다. 앱은 기존 Claude Code Keychain 항목을 승인 하에 읽을 뿐 토큰을 복사·저장하지 않는다. 재인증 후 놓친 창을 소급하지 않는다.
+- 실행: 저장 시 Keychain 승인, 자동 no-UI source→cache fallback, 401·만료·cache 부재를 확인한다.
+- 기대: access token만 `AfterFirstUnlockThisDeviceOnly` cache에 저장하고 refresh token·UserDefaults·로그에는 남기지 않는다. 401·잠금은 잠금 해제 후 새로고침을 안내한다.
 - 증거: 상태 화면, 준비 전 spawn-count=0, Keychain 승인·거부 결과.
 
 ### TC-PTY-001 — 최소 대화형 PTY와 실패 정리 (P0, Integration+macOS)
@@ -90,7 +90,7 @@
 ### TC-UI-001 — 상태·수동 제어·알림·로그인 실행 (P1, Integration+macOS)
 
 - 참조: `REQ-001`, `REQ-012`, `REQ-013`; `FLOW-011`, `FLOW-012`, `FLOW-013`
-- 실행: 오늘 정지, 다음 한 건 건너뛰기, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
+- 실행: draft 변경 후 저장/미저장, 오늘 정지, 다음 한 건 건너뛰기, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
 - 기대: 오늘 정지는 오늘 남은 미시작 자동 창을 막는다. 다음 건너뛰기는 한 건만 `skipped`로 기록하고 `targetAt + 5시간` fallback으로 후속 창을 이어간다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다. 메뉴에 다음 실행·최근 결과·오류가 보이고 로그인 시 단일 인스턴스로 시작한다.
 - 증거: 제어 전후 next-run/상태, 호출 ledger, 알림과 process list.
 
