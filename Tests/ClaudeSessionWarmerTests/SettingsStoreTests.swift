@@ -28,6 +28,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.loadSettings().excludeKoreanHolidays)
         XCTAssertFalse(store.loadSettings().launchAtLogin)
         XCTAssertEqual(store.loadDailyCycle(), DailyCycle())
+        XCTAssertNil(store.loadQuotaCache())
     }
 
     func testSettingsRoundTrip() {
@@ -66,9 +67,42 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(DailyCycle(handledWindows: 4).handledWindows, 3)
     }
 
+    func testQuotaCacheRoundTripAndClearDoNotChangeSettings() {
+        let store = SettingsStore(defaults: defaults)
+        let settings = ScheduleSettings(
+            firstWarmupMinutes: 9 * 60,
+            weekdays: [2, 3, 4],
+            excludeKoreanHolidays: false,
+            launchAtLogin: false
+        )
+        let cache = QuotaCache(
+            quota: QuotaWindow(
+                active: true,
+                usedPercent: 23,
+                resetsAt: Date(timeIntervalSince1970: 1_800_018_000)
+            ),
+            fetchedAt: Date(timeIntervalSince1970: 1_800_000_000)
+        )
+
+        store.saveSettings(settings)
+        store.saveQuotaCache(cache)
+
+        XCTAssertEqual(store.loadQuotaCache(), cache)
+        XCTAssertEqual(store.loadSettings(), settings)
+
+        store.clearQuotaCache()
+
+        XCTAssertNil(store.loadQuotaCache())
+        XCTAssertEqual(store.loadSettings(), settings)
+    }
+
     func testPersistedModelsContainOnlyExpectedFields() throws {
         let scheduleKeys = Set(try jsonObjectKeys(for: ScheduleSettings()))
         let cycleKeys = Set(try jsonObjectKeys(for: DailyCycle()))
+        let quotaCacheKeys = Set(try jsonObjectKeys(for: QuotaCache(
+            quota: QuotaWindow(active: false, usedPercent: nil, resetsAt: nil),
+            fetchedAt: Date(timeIntervalSince1970: 0)
+        )))
 
         XCTAssertEqual(
             scheduleKeys,
@@ -78,8 +112,9 @@ final class SettingsStoreTests: XCTestCase {
             cycleKeys,
             ["handledWindows"]
         )
+        XCTAssertEqual(quotaCacheKeys, ["quota", "fetchedAt"])
 
-        let persistedKeys = scheduleKeys.union(cycleKeys)
+        let persistedKeys = scheduleKeys.union(cycleKeys).union(quotaCacheKeys)
         XCTAssertTrue(persistedKeys.isDisjoint(with: [
             "token", "accessToken", "refreshToken", "oauthToken", "apiKey", "authorization"
         ]))

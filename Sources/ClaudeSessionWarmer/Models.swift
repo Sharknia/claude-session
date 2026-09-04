@@ -38,6 +38,11 @@ struct QuotaWindow: Codable, Equatable, Sendable {
     var resetsAt: Date?
 }
 
+struct QuotaCache: Codable, Equatable, Sendable {
+    var quota: QuotaWindow
+    var fetchedAt: Date
+}
+
 struct WarmupRecord: Codable, Equatable, Sendable {
     var timestamp: Date
     var status: WarmupStatus

@@ -4,6 +4,7 @@ final class SettingsStore {
     private enum Key {
         static let scheduleSettings = "scheduleSettings"
         static let dailyCycle = "dailyCycle"
+        static let quotaCache = "quotaCache"
     }
 
     private let defaults: UserDefaults
@@ -28,6 +29,18 @@ final class SettingsStore {
 
     func saveDailyCycle(_ cycle: DailyCycle) {
         encode(cycle, forKey: Key.dailyCycle)
+    }
+
+    func loadQuotaCache() -> QuotaCache? {
+        decode(QuotaCache.self, forKey: Key.quotaCache)
+    }
+
+    func saveQuotaCache(_ cache: QuotaCache) {
+        encode(cache, forKey: Key.quotaCache)
+    }
+
+    func clearQuotaCache() {
+        defaults.removeObject(forKey: Key.quotaCache)
     }
 
     private func decode<Value: Decodable>(_ type: Value.Type, forKey key: String) -> Value? {

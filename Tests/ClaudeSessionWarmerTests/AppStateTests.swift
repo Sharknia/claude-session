@@ -3,6 +3,19 @@ import XCTest
 @testable import ClaudeSessionWarmer
 
 final class AppStateTests: XCTestCase {
+    @MainActor
+    func testQuotaCacheExpiresAfterFiveMinutes() {
+        let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
+        let cache = QuotaCache(
+            quota: QuotaWindow(active: true, usedPercent: 12, resetsAt: nil),
+            fetchedAt: fetchedAt
+        )
+
+        XCTAssertTrue(AppState.isQuotaCacheFresh(cache, at: fetchedAt.addingTimeInterval(299)))
+        XCTAssertFalse(AppState.isQuotaCacheFresh(cache, at: fetchedAt.addingTimeInterval(300)))
+        XCTAssertFalse(AppState.isQuotaCacheFresh(cache, at: fetchedAt.addingTimeInterval(-1)))
+    }
+
     func testCurrentFiveHourRangeUsesFixedTwentyFourHourFormat() throws {
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = try XCTUnwrap(TimeZone(identifier: "Asia/Seoul"))

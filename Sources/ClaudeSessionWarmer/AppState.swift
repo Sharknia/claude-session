@@ -12,6 +12,8 @@ enum ClaudeConnectionState: Equatable {
 
 @MainActor
 final class AppState: ObservableObject {
+    static let quotaCacheLifetime: TimeInterval = 5 * 60
+
     @Published private(set) var settings: ScheduleSettings
     @Published private(set) var cycle: DailyCycle
     @Published private(set) var nextEvent: ScheduledEvent?
@@ -28,6 +30,7 @@ final class AppState: ObservableObject {
     private var timer: Timer?
     private var startedTargetsThisRun: Set<Date> = []
     private var isSilentRefreshRunning = false
+    private var lastSilentRefreshAt: Date?
 
     init(
         store: SettingsStore = SettingsStore(),
@@ -41,6 +44,11 @@ final class AppState: ObservableObject {
         cycle = savedCycle
         status = savedCycle.lastRecord?.status ?? .idle
         statusMessage = savedCycle.lastRecord?.message ?? "대기 중"
+        if let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: Date()) {
+            currentQuota = cache.quota
+            connectionState = .connected
+            lastSilentRefreshAt = cache.fetchedAt
+        }
         syncLaunchAtLoginStatus()
         diagnosticLogCritical("app.started", [
             "pid": "\(ProcessInfo.processInfo.processIdentifier)",
@@ -127,7 +135,7 @@ final class AppState: ObservableObject {
         Task {
             do {
                 let inspection = try await Self.loginManagedClaude()
-                currentQuota = inspection.quota
+                cacheQuota(inspection.quota)
                 connectionState = .connected
                 status = inspection.quota.active ? .satisfied : .idle
                 statusMessage = "Claude에 연결했습니다."
@@ -143,6 +151,18 @@ final class AppState: ObservableObject {
 
     func refreshSilently() {
         guard !isWorking, !isSilentRefreshRunning else { return }
+        let now = Date()
+        if let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: now) {
+            currentQuota = cache.quota
+            connectionState = .connected
+            lastSilentRefreshAt = cache.fetchedAt
+            return
+        }
+        if let lastSilentRefreshAt,
+           now.timeIntervalSince(lastSilentRefreshAt) < Self.quotaCacheLifetime {
+            return
+        }
+        lastSilentRefreshAt = now
         isSilentRefreshRunning = true
         if connectionState != .connected {
             connectionState = .checking
@@ -152,10 +172,14 @@ final class AppState: ObservableObject {
             defer { isSilentRefreshRunning = false }
             do {
                 let inspection = try await Self.inspectManagedClaude()
-                currentQuota = inspection.quota
+                cacheQuota(inspection.quota)
                 connectionState = .connected
             } catch {
-                currentQuota = nil
+                if let serviceError = error as? ClaudeServiceError,
+                   serviceError != .quotaRateLimited,
+                   serviceError != .quotaUnavailable {
+                    currentQuota = nil
+                }
                 updateConnectionFailure(error)
                 if case .disconnected = connectionState, currentQuota == nil {
                     status = .idle
@@ -201,7 +225,7 @@ final class AppState: ObservableObject {
                     throw AppStateError.quotaNotActivated
                 }
 
-                currentQuota = inspection.quota
+                cacheQuota(inspection.quota)
                 connectionState = .connected
                 if belongsToActiveCycle {
                     cycle.handledWindows = min(cycle.handledWindows + 1, ScheduleEngine.maximumWindowsPerDay)
@@ -407,7 +431,7 @@ final class AppState: ObservableObject {
         status completedStatus: WarmupStatus,
         message: String
     ) {
-        currentQuota = quota
+        cacheQuota(quota)
         cycle.handledWindows = min(
             max(cycle.handledWindows, event.windowNumber),
             ScheduleEngine.maximumWindowsPerDay
@@ -546,6 +570,16 @@ final class AppState: ObservableObject {
         ]
     }
 
+    static func isQuotaCacheFresh(_ cache: QuotaCache, at now: Date) -> Bool {
+        let age = now.timeIntervalSince(cache.fetchedAt)
+        return age >= 0 && age < quotaCacheLifetime
+    }
+
+    private func cacheQuota(_ quota: QuotaWindow) {
+        currentQuota = quota
+        store.saveQuotaCache(QuotaCache(quota: quota, fetchedAt: Date()))
+    }
+
     private func logQuotaDecision(
         _ quota: QuotaWindow,
         phase: String,
@@ -599,9 +633,15 @@ final class AppState: ObservableObject {
         }
         if serviceError == .managedCredentialsUnavailable {
             connectionState = .disconnected
+        } else if serviceError == .quotaRateLimited
+                    || serviceError == .quotaUnavailable
+                    || serviceError == .invalidUsageResponse {
+            if connectionState == .checking {
+                connectionState = .connected
+            }
         } else if serviceError != .warmupNotStarted,
-                  serviceError != .warmupTimedOut,
-                  serviceError != .warmupFailed {
+                    serviceError != .warmupTimedOut,
+                    serviceError != .warmupFailed {
             connectionState = .failed(error.localizedDescription)
         }
     }
