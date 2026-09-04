@@ -18,6 +18,7 @@ final class AppState: ObservableObject {
     @Published private(set) var status: WarmupStatus
     @Published private(set) var statusMessage: String
     @Published private(set) var isWorking = false
+    @Published private(set) var isManualWarmupRunning = false
     @Published private(set) var connectionState: ClaudeConnectionState = .disconnected
 
     private let store: SettingsStore
@@ -153,8 +154,7 @@ final class AppState: ObservableObject {
     func manualWarmup() {
         guard !isWorking else { return }
         isWorking = true
-        status = .checking
-        statusMessage = "수동 워밍 준비 중"
+        isManualWarmupRunning = true
         let now = Date()
         let expectedReset = cycle.nextResetAt
         let belongsToActiveCycle = cycle.dayKey == engine.dayKey(for: now)
@@ -166,7 +166,6 @@ final class AppState: ObservableObject {
             var attemptedTarget: Date?
             do {
                 var inspection = try await Self.inspectManagedClaude()
-                connectionState = .connected
                 var performedWarmup = false
                 if !inspection.quota.active {
                     guard !hasRecentWarmupAttempt(at: now) else {
@@ -176,8 +175,6 @@ final class AppState: ObservableObject {
                     cycle.lastWarmupTargetAt = target
                     store.saveDailyCycle(cycle)
                     attemptedTarget = target
-                    status = .warming
-                    statusMessage = "Claude 워밍 중"
                     try await Self.runManagedWarmup(cliURL: inspection.cliURL)
                     performedWarmup = true
                     inspection = try await Self.inspectManagedClaude()
@@ -187,6 +184,7 @@ final class AppState: ObservableObject {
                 }
 
                 currentQuota = inspection.quota
+                connectionState = .connected
                 if belongsToActiveCycle {
                     cycle.handledWindows = min(cycle.handledWindows + 1, ScheduleEngine.maximumWindowsPerDay)
                     cycle.nextResetAt = cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
@@ -211,6 +209,7 @@ final class AppState: ObservableObject {
                 store.saveDailyCycle(cycle)
             }
             isWorking = false
+            isManualWarmupRunning = false
         }
     }
 

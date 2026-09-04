@@ -174,8 +174,27 @@ struct MenuContent: View {
     }
 
     private var actions: some View {
-        actionButton("지금 워밍", prominent: true) { state.manualWarmup() }
-            .disabled(state.isWorking)
+        Button {
+            state.manualWarmup()
+        } label: {
+            ZStack {
+                Text("지금 워밍")
+                    .opacity(state.isManualWarmupRunning ? 0 : 1)
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("워밍 중")
+                }
+                .opacity(state.isManualWarmupRunning ? 1 : 0)
+            }
+            .frame(maxWidth: .infinity)
+            .frame(height: 18)
+        }
+        .buttonStyle(.borderedProminent)
+        .controlSize(.large)
+        .frame(maxWidth: .infinity)
+        .accessibilityLabel(state.isManualWarmupRunning ? "워밍 중" : "지금 워밍")
+        .disabled(state.isWorking || state.connectionState != .connected)
     }
 
     private var footer: some View {
@@ -341,32 +360,6 @@ struct MenuContent: View {
             Spacer()
             Toggle("", isOn: isOn)
                 .labelsHidden()
-        }
-    }
-
-    @ViewBuilder
-    private func actionButton(
-        _ title: String,
-        prominent: Bool = false,
-        tint: Color? = nil,
-        action: @escaping () -> Void
-    ) -> some View {
-        if prominent {
-            Button(action: action) {
-                Text(title).frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(tint)
-            .controlSize(.large)
-            .frame(maxWidth: .infinity)
-        } else {
-            Button(action: action) {
-                Text(title).frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.bordered)
-            .tint(tint)
-            .controlSize(.large)
-            .frame(maxWidth: .infinity)
         }
     }
 
