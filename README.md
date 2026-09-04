@@ -75,3 +75,11 @@ NOTARY_PROFILE="claude-session-notary" \
 managed Claude OAuth 단일계정 흐름과 자동화 테스트는 구현했습니다. 실제 브라우저 callback·token exchange, 회전 refresh, Developer ID 빌드의 앱 Keychain과 화면 잠금 상태 자동 실행은 내부 Mac에서 추가 검증해야 합니다.
 
 비활성 사용량 창에서 PTY 워밍이 일반 Claude 구독의 새 5시간 창을 여는 라이브 앵커 검증은 아직 수행하지 않았습니다. 이 검증을 통과하기 전까지 배포 판단은 **CONDITIONAL GO**입니다.
+
+## 월요일 진단
+
+진단 로그는 `~/Library/Logs/ClaudeSessionWarmer/events.jsonl`과 교체본 `events.previous.jsonl`에 JSONL로 남깁니다. 디렉터리는 `0700`, 파일은 `0600`, 각 파일은 2MiB로 제한합니다. app start/heartbeat/terminate, 화면 잠금·display/system sleep·wake, schedule·timer drift, quota HTTP 결과와 response hash·size·top-level keys·`five_hour` 형태/known fields, pre/post 결정, OAuth refresh, PTY spawn/pid/marker/timeout, retry/fallback/final만 기록합니다.
+
+token·authorization header·OAuth code/state/verifier·prompt/output·raw body·경로는 기록하지 않습니다.
+
+월요일에는 `tail -f ~/Library/Logs/ClaudeSessionWarmer/events.jsonl`로 현재 `launch_id`를 확인하고, 각 `target_at`의 schedule → timer drift → quota/PTY → final/fallback 순서를 대조합니다. sleep/wake 사이 공백은 놓친 창과 fallback을, lock 상태의 연속 heartbeat와 timer 발화는 잠금 중 실행을 보여 줍니다. terminate 없는 launch 종료는 비정상 종료 또는 강제 종료로 구분합니다.

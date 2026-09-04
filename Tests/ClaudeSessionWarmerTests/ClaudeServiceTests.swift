@@ -153,6 +153,28 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertNil(resetless.resetsAt)
     }
 
+    func testUsageDiagnosticsDescribeShapeWithoutStoringBody() {
+        let objectData = Data("{\"five_hour\":{\"utilization\":27,\"resets_at\":\"2026-09-04T10:20:00Z\",\"limit_dollars\":null},\"seven_day\":null}".utf8)
+        let object = ClaudeUsageAdapter.diagnosticMetadata(objectData)
+        XCTAssertEqual(object["shape"], "object")
+        XCTAssertEqual(object["location"], "top_level")
+        XCTAssertEqual(object["utilization_field"], "valid_type")
+        XCTAssertEqual(object["resets_at_field"], "valid_type")
+        XCTAssertEqual(object["top_level_keys"], "five_hour,seven_day")
+        XCTAssertEqual(object["response_bytes"], "\(objectData.count)")
+        XCTAssertEqual(object["response_sha256"]?.count, 64)
+        XCTAssertFalse(object.values.contains { $0.contains("2026-09-04T10:20:00Z") })
+
+        XCTAssertEqual(
+            ClaudeUsageAdapter.diagnosticMetadata(Data("{\"five_hour\":null}".utf8))["shape"],
+            "null"
+        )
+        XCTAssertEqual(
+            ClaudeUsageAdapter.diagnosticMetadata(Data("{\"seven_day\":null}".utf8))["shape"],
+            "missing"
+        )
+    }
+
     func testWarmupCommandIsPTYSafeAndRemovesAPIKey() {
         let command = ClaudeWarmupCommand.make(
             executableURL: URL(fileURLWithPath: "/tmp/fake-claude"),

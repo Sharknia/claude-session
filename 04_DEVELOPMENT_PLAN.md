@@ -147,6 +147,8 @@ UI 시안, 자동 업데이트, 다중 제공자 구조, 복잡한 재시도 프
 - 비활성 창 라이브 워밍
 - 실제 브라우저 callback·token exchange, Developer ID 빌드의 앱 Keychain과 화면 잠금 중 no-UI refresh
 
+월요일 진단은 `~/Library/Logs/ClaudeSessionWarmer/events.jsonl`/`events.previous.jsonl`(JSONL, 2MiB x2, 0700/0600)에 lifecycle·sleep/wake·schedule/timer drift·quota 요약(hash/size/keys/`five_hour` 형태)·결정·OAuth refresh·PTY·retry/fallback/final만 append한다. token, header, code/state/verifier, prompt/output, raw body, path는 제외한다.
+
 ## 9. 배포 전 필수 게이트
 
 비활성 5시간 창이 생긴 자연스러운 시점에 다음을 한 번 검증한다.

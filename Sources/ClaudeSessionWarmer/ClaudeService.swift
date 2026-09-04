@@ -1,4 +1,5 @@
 import AppKit
+import CryptoKit
 import Foundation
 import LocalAuthentication
 import Security
@@ -106,6 +107,51 @@ struct ClaudeUsageAdapter {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         request.setValue("oauth-2025-04-20", forHTTPHeaderField: "anthropic-beta")
         return request
+    }
+
+    static func diagnosticMetadata(_ data: Data) -> [String: String] {
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        var metadata = [
+            "response_bytes": "\(data.count)",
+            "response_sha256": digest
+        ]
+        guard let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            metadata["shape"] = "invalid_json"
+            return metadata
+        }
+        metadata["top_level_keys"] = root.keys.sorted().joined(separator: ",")
+
+        let rawFiveHour: Any?
+        if root.keys.contains("five_hour") {
+            metadata["location"] = "top_level"
+            rawFiveHour = root["five_hour"]
+        } else if let limits = root["rate_limits"] as? [String: Any], limits.keys.contains("five_hour") {
+            metadata["location"] = "rate_limits"
+            rawFiveHour = limits["five_hour"]
+        } else {
+            metadata["shape"] = "missing"
+            return metadata
+        }
+
+        if rawFiveHour is NSNull {
+            metadata["shape"] = "null"
+            return metadata
+        }
+        guard let window = rawFiveHour as? [String: Any] else {
+            metadata["shape"] = "invalid_type"
+            return metadata
+        }
+        metadata["shape"] = "object"
+        metadata["five_hour_keys"] = window.keys.sorted().joined(separator: ",")
+        metadata["utilization_field"] = fieldState(window["utilization"], expected: NSNumber.self)
+        metadata["resets_at_field"] = fieldState(window["resets_at"], expected: NSString.self)
+        return metadata
+    }
+
+    private static func fieldState<T>(_ value: Any?, expected: T.Type) -> String {
+        guard let value else { return "missing" }
+        if value is NSNull { return "null" }
+        return value is T ? "valid_type" : "invalid_type"
     }
 
     private static func parseISO8601(_ value: String) -> Date? {
@@ -349,16 +395,55 @@ final class ClaudeService {
     private func refreshedManagedCredentialIfNeeded(session: URLSession, force: Bool) async throws -> ManagedClaudeCredential {
         let credential = try readManagedCredential()
         guard force || credential.needsRefresh() else { return credential }
-        let refreshed = try await Self.refreshCoordinator.run {
-            try await Self.refreshManagedCredential(credential, session: session)
+        diagnosticLog("oauth.refresh_requested", [
+            "operation_id": DiagnosticContext.operationID ?? "none",
+            "reason": force ? "forced_after_unauthorized" : "expiry_window",
+            "previous_expires_at": diagnosticDate(credential.expiresAt)
+        ])
+        do {
+            let refreshed = try await Self.refreshCoordinator.run {
+                try await Self.refreshManagedCredential(credential, session: session)
+            }
+            try storeManagedCredential(refreshed)
+            diagnosticLog("oauth.refresh_completed", [
+                "operation_id": DiagnosticContext.operationID ?? "none",
+                "outcome": "success",
+                "new_expires_at": diagnosticDate(refreshed.expiresAt),
+                "refresh_rotated": refreshed.refreshToken == credential.refreshToken ? "false" : "true"
+            ])
+            return refreshed
+        } catch {
+            diagnosticLog("oauth.refresh_completed", [
+                "operation_id": DiagnosticContext.operationID ?? "none",
+                "outcome": "failed",
+                "error_code": Self.diagnosticErrorCode(error)
+            ])
+            throw error
         }
-        try storeManagedCredential(refreshed)
-        return refreshed
     }
 
     private static func refreshManagedCredential(_ credential: ManagedClaudeCredential, session: URLSession) async throws -> ManagedClaudeCredential {
         let request = makeRefreshRequest(refreshToken: credential.refreshToken)
-        let (data, response) = try await session.data(for: request)
+        let startedAt = Date()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(for: request)
+        } catch {
+            diagnosticLog("oauth.refresh_http", [
+                "operation_id": DiagnosticContext.operationID ?? "none",
+                "outcome": "network_error",
+                "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+            ])
+            throw ClaudeServiceError.oauthRefreshFailed
+        }
+        let statusCode = (response as? HTTPURLResponse)?.statusCode
+        diagnosticLog("oauth.refresh_http", [
+            "operation_id": DiagnosticContext.operationID ?? "none",
+            "outcome": statusCode == 200 ? "success" : "http_error",
+            "status_code": statusCode.map(String.init) ?? "none",
+            "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+        ])
         guard let http = response as? HTTPURLResponse, http.statusCode == 200,
               let refreshed = mergeRefreshResponse(data, into: credential) else {
             throw ClaudeServiceError.oauthRefreshFailed
@@ -413,14 +498,62 @@ final class ClaudeService {
     }
 
     func fetchQuota(accessToken: String, session: URLSession = .shared) async throws -> QuotaWindow {
-        let (data, response) = try await session.data(for: ClaudeUsageAdapter.makeRequest(accessToken: accessToken))
-        guard let http = response as? HTTPURLResponse else {
+        let requestID = UUID().uuidString
+        let operationID = DiagnosticContext.operationID ?? requestID
+        let startedAt = Date()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await session.data(
+                for: ClaudeUsageAdapter.makeRequest(accessToken: accessToken)
+            )
+        } catch {
+            diagnosticLog("quota.http_result", [
+                "request_id": requestID,
+                "operation_id": operationID,
+                "outcome": "network_error",
+                "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+            ])
             throw ClaudeServiceError.quotaUnavailable
         }
+        guard let http = response as? HTTPURLResponse else {
+            diagnosticLog("quota.http_result", [
+                "request_id": requestID,
+                "operation_id": operationID,
+                "outcome": "invalid_response",
+                "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
+            ])
+            throw ClaudeServiceError.quotaUnavailable
+        }
+        let httpMetadata = [
+            "request_id": requestID,
+            "operation_id": operationID,
+            "status_code": "\(http.statusCode)",
+            "outcome": Self.quotaHTTPOutcome(http.statusCode),
+            "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))",
+            "response_bytes": "\(data.count)",
+            "response_sha256": SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        ]
+        diagnosticLog("quota.http_result", httpMetadata)
         guard (200...299).contains(http.statusCode) else {
             throw Self.quotaError(for: http.statusCode)
         }
-        return try ClaudeUsageAdapter.parseQuotaWindow(data)
+        var shapeMetadata = ClaudeUsageAdapter.diagnosticMetadata(data)
+        shapeMetadata["request_id"] = requestID
+        shapeMetadata["operation_id"] = operationID
+        do {
+            let quota = try ClaudeUsageAdapter.parseQuotaWindow(data)
+            shapeMetadata["parse"] = "success"
+            shapeMetadata["active"] = quota.active ? "true" : "false"
+            shapeMetadata["used_percent"] = quota.usedPercent.map { String($0) } ?? "none"
+            shapeMetadata["resets_at"] = diagnosticDate(quota.resetsAt)
+            diagnosticLog("quota.five_hour_shape", shapeMetadata)
+            return quota
+        } catch {
+            shapeMetadata["parse"] = "failed"
+            diagnosticLog("quota.five_hour_shape", shapeMetadata)
+            throw error
+        }
     }
 
     static func quotaError(for statusCode: Int) -> ClaudeServiceError {
@@ -431,11 +564,63 @@ final class ClaudeService {
         }
     }
 
+    private static func quotaHTTPOutcome(_ statusCode: Int) -> String {
+        switch statusCode {
+        case 200...299: return "success"
+        case 401, 403: return "unauthorized"
+        case 429: return "rate_limited"
+        default: return "unavailable"
+        }
+    }
+
+    static func diagnosticErrorCode(_ error: Error) -> String {
+        guard let error = error as? ClaudeServiceError else { return "unexpected" }
+        switch error {
+        case .cliNotFound: return "cli_not_found"
+        case .credentialsUnavailable: return "keychain_unavailable"
+        case .managedCredentialsUnavailable: return "managed_credentials_missing"
+        case .loginCaptureFailed: return "oauth_login_failed"
+        case .oauthLoginTimedOut: return "oauth_login_timeout"
+        case .oauthRefreshFailed: return "oauth_refresh_failed"
+        case .invalidUsageResponse: return "usage_parse_failed"
+        case .quotaUnauthorized: return "usage_unauthorized"
+        case .quotaRateLimited: return "usage_rate_limited"
+        case .quotaUnavailable: return "usage_unavailable"
+        case .warmupNotStarted: return "warmup_not_started"
+        case .warmupTimedOut: return "warmup_timeout"
+        case .warmupFailed: return "warmup_marker_missing"
+        }
+    }
+
     /// 이 메서드는 실제 워밍 실행 경로다. 테스트에서는 호출하지 않는다.
     func performWarmup(command: ClaudeWarmupCommand, timeout: TimeInterval = 30) throws {
+        let diagnosticStartedAt = Date()
+        var diagnosticOutcome = "setup_failed"
+        var diagnosticProcess: Process?
+        var diagnosticProcessStarted = false
+        var requiredForcedStop = false
+        defer {
+            var metadata = [
+                "outcome": diagnosticOutcome,
+                "operation_id": DiagnosticContext.operationID ?? "none",
+                "elapsed_ms": "\(Int(Date().timeIntervalSince(diagnosticStartedAt) * 1_000))",
+                "forced_termination": requiredForcedStop ? "true" : "false"
+            ]
+            if let process = diagnosticProcess {
+                metadata["pid"] = "\(process.processIdentifier)"
+                if diagnosticProcessStarted, !process.isRunning {
+                    metadata["exit_status"] = "\(process.terminationStatus)"
+                }
+            }
+            diagnosticLogCritical("warmup.process_finished", metadata)
+        }
+
         var masterFD: Int32 = -1
         var slaveFD: Int32 = -1
-        guard openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 else { throw ClaudeServiceError.warmupNotStarted }
+        guard openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 else {
+            diagnosticOutcome = "pty_open_failed"
+            throw ClaudeServiceError.warmupNotStarted
+        }
         defer {
             if masterFD >= 0 { close(masterFD) }
             if slaveFD >= 0 { close(slaveFD) }
@@ -446,11 +631,13 @@ final class ClaudeService {
         do {
             try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
         } catch {
+            diagnosticOutcome = "temp_directory_failed"
             throw ClaudeServiceError.warmupNotStarted
         }
         defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
 
         let process = Process()
+        diagnosticProcess = process
         process.executableURL = command.executableURL
         process.arguments = command.arguments
         process.environment = command.environment
@@ -466,14 +653,28 @@ final class ClaudeService {
         do {
             try process.run()
         } catch {
+            diagnosticOutcome = "spawn_failed"
             throw ClaudeServiceError.warmupNotStarted
         }
         processStarted = true
+        diagnosticProcessStarted = true
+        diagnosticOutcome = "running"
+        diagnosticLog("warmup.process_started", [
+            "pid": "\(process.processIdentifier)",
+            "operation_id": DiagnosticContext.operationID ?? "none",
+            "timeout_ms": "\(Int(timeout * 1_000))"
+        ])
         close(slaveFD)
         slaveFD = -1
 
         _ = fcntl(masterFD, F_SETFL, fcntl(masterFD, F_GETFL) | O_NONBLOCK)
-        try writeToPTY("\(command.prompt)\r", fd: masterFD)
+        do {
+            try writeToPTY("\(command.prompt)\r", fd: masterFD)
+        } catch {
+            diagnosticOutcome = "pty_write_failed"
+            requiredForcedStop = process.isRunning
+            throw error
+        }
         let deadline = Date().addingTimeInterval(timeout)
         var output = Data()
         var receivedMarker = false
@@ -497,9 +698,16 @@ final class ClaudeService {
             while process.isRunning && Date() < exitDeadline { usleep(25_000) }
         }
         guard receivedMarker else {
-            if Date() >= deadline { throw ClaudeServiceError.warmupTimedOut }
+            requiredForcedStop = process.isRunning
+            if Date() >= deadline {
+                diagnosticOutcome = "timeout"
+                throw ClaudeServiceError.warmupTimedOut
+            }
+            diagnosticOutcome = "exit_without_marker"
             throw ClaudeServiceError.warmupFailed
         }
+        diagnosticOutcome = "marker_received"
+        requiredForcedStop = process.isRunning
     }
 
     private func run(executable: URL, arguments: [String]) throws -> (stdout: Data, status: Int32) {

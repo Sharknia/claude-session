@@ -142,4 +142,8 @@
 - macOS/수동 증거에는 빌드 hash, OS·CLI·앱 버전, 수행자, 시각, redacted 로그와 필요한 화면 캡처를 포함한다.
 - 토큰·cookie·Keychain 원문·대화 전문·프로젝트 내용은 증거에 첨부하지 않는다. managed credential은 앱 Keychain 외 저장소와 로그에 남지 않아야 한다.
 
+### 월요일 진단 로그
+
+`~/Library/Logs/ClaudeSessionWarmer/events.jsonl`과 `events.previous.jsonl`은 JSONL, 2MiB x2, 디렉터리 `0700`·파일 `0600`으로 유지한다. app start/heartbeat/terminate, lock/display/system sleep/wake, schedule/timer drift, quota HTTP 분류와 response hash·size·top keys·`five_hour` 형태/known fields, 결정 전후, OAuth refresh, PTY spawn/pid/marker/timeout, retry/fallback/final을 검증한다. token·authorization header·code/state/verifier·prompt/output·raw body·path는 fixture·로그·증거에 넣지 않는다.
+
 내부 배포는 모든 P0 자동/macOS 테스트, secret 확인, `TC-DIST-001`, `TC-LIVE-001`이 Pass일 때만 허용한다. quota/CLI/인증 방식 변경 시 TC-AUTH-001, TC-PTY-001, TC-QUOTA-001, TC-LIVE-001을 재실행하고, scheduler 변경 시 TC-CORE-001~004를 재실행한다.
