@@ -3,77 +3,84 @@ import LocalAuthentication
 @testable import ClaudeSessionWarmer
 
 final class ClaudeServiceTests: XCTestCase {
-    func testAuthStatusAcceptsClaudeAISubscription() throws {
-        let data = Data("{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"pro\"}".utf8)
-        XCTAssertEqual(try ClaudeAuthStatus.parse(data).subscriptionType, "pro")
-    }
-
-    func testAuthStatusRejectsAPIProvider() {
-        let data = Data("{\"loggedIn\":true,\"authMethod\":\"apiKey\",\"apiProvider\":\"api\",\"subscriptionType\":\"\"}".utf8)
-        XCTAssertThrowsError(try ClaudeAuthStatus.parse(data)) { error in
-            XCTAssertEqual(error as? ClaudeServiceError, .apiBillingEnvironment)
-        }
-    }
-
-    func testCheckAuthParsesJSONFromFakeExecutable() throws {
-        let directory = FileManager.default.temporaryDirectory
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: directory) }
-        let executable = directory.appendingPathComponent("claude")
-        try "#!/bin/sh\n[ \"$1\" = auth ] && [ \"$2\" = status ] && [ \"$#\" = 2 ] || exit 44\necho '{\"loggedIn\":true,\"authMethod\":\"claude.ai\",\"apiProvider\":\"firstParty\",\"subscriptionType\":\"team\"}'\n"
-            .write(to: executable, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
-
-        XCTAssertEqual(try ClaudeService().checkAuth(cliURL: executable).subscriptionType, "team")
-    }
-
     func testUsageRequestUsesOAuthBetaHeader() {
         let request = ClaudeUsageAdapter.makeRequest(accessToken: "not-a-real-token")
         XCTAssertEqual(request.value(forHTTPHeaderField: "anthropic-beta"), "oauth-2025-04-20")
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer not-a-real-token")
     }
 
-    func testCredentialParserAcceptsNestedClaudeAIOAuthToken() throws {
-        let data = Data("{\"claudeAiOauth\":{\"accessToken\":\"not-a-real-token\",\"refreshToken\":\"must-not-copy\"}}".utf8)
-        XCTAssertEqual(try ClaudeService.parseAccessToken(from: data), "not-a-real-token")
-    }
-
     func testCredentialQueriesUseSourceWithoutUIAndAppOnlyCache() {
         let manualSource = ClaudeCredentialQueries.source(allowsInteraction: true)
         let automaticSource = ClaudeCredentialQueries.source(allowsInteraction: false)
-        let cache = ClaudeCredentialQueries.cacheAddPayload(token: "test-access-token")
+        let mutation = ClaudeCredentialQueries.sourceMutation(service: ClaudeCredentialQueries.sourceService)
+        let cache = ClaudeCredentialQueries.cacheAddPayload(data: Data("managed".utf8))
 
         XCTAssertEqual(manualSource[kSecAttrService] as? String, ClaudeCredentialQueries.sourceService)
+        XCTAssertEqual(manualSource[kSecAttrAccount] as? String, ClaudeCredentialQueries.sourceAccount())
         XCTAssertNil(manualSource[kSecUseAuthenticationContext])
         XCTAssertTrue((automaticSource[kSecUseAuthenticationContext] as? LAContext)?.interactionNotAllowed == true)
+        XCTAssertNil(mutation[kSecReturnData])
+        XCTAssertNil(mutation[kSecMatchLimit])
         XCTAssertEqual(cache[kSecAttrService] as? String, ClaudeCredentialQueries.cacheService)
         XCTAssertEqual(cache[kSecAttrAccount] as? String, ClaudeCredentialQueries.cacheAccount)
         XCTAssertEqual(cache[kSecAttrAccessible] as? String, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
-    }
-
-    func testManualCredentialErrorsUseUserFacingCategories() {
         XCTAssertEqual(
-            ClaudeService.manualCredentialError(for: errSecItemNotFound),
-            .credentialsUnavailable
+            ClaudeCredentialQueries.sourceAccount(environment: ["USER": "valid-user"], systemUsername: "ignored"),
+            "valid-user"
         )
         XCTAssertEqual(
-            ClaudeService.manualCredentialError(for: errSecUserCanceled),
-            .credentialsRequireManualRefresh
+            ClaudeCredentialQueries.sourceAccount(environment: ["USER": "first@example.com"], systemUsername: "ignored"),
+            "claude-code-user"
         )
         XCTAssertEqual(
-            ClaudeService.manualCredentialError(for: errSecAuthFailed),
-            .credentialsRequireManualRefresh
+            ClaudeCredentialQueries.sourceAccount(environment: ["USER": "first last"], systemUsername: "ignored"),
+            "claude-code-user"
         )
     }
 
-    func testCachePayloadContainsOnlyAccessToken() throws {
-        let payload = ClaudeService.cachePayload(for: "test-access-token")
-        XCTAssertEqual(try ClaudeService.parseCachedAccessToken(payload), "test-access-token")
-        XCTAssertFalse(String(decoding: payload, as: UTF8.self).contains("refresh"))
-        XCTAssertThrowsError(try ClaudeService.parseCachedAccessToken(Data())) { error in
-            XCTAssertEqual(error as? ClaudeServiceError, .credentialsRequireManualRefresh)
-        }
+    func testManagedCredentialParserAndScopedService() throws {
+        let data = Data("{\"claudeAiOauth\":{\"accessToken\":\"managed-access\",\"refreshToken\":\"managed-refresh\",\"expiresAt\":1800000000000,\"scopes\":[\"user:inference\"]}}".utf8)
+        let credential = try ClaudeService.parseManagedCredential(from: data)
+        XCTAssertEqual(credential.accessToken, "managed-access")
+        XCTAssertEqual(credential.refreshToken, "managed-refresh")
+        XCTAssertEqual(credential.expiresAtMilliseconds, 1_800_000_000_000)
+        XCTAssertEqual(credential.scopes, ["user:inference"])
+        XCTAssertEqual(try ClaudeService.parseManagedCredential(from: JSONEncoder().encode(credential)), credential)
+        XCTAssertEqual(
+            ClaudeService.scopedClaudeService(for: "e\u{301}"),
+            ClaudeService.scopedClaudeService(for: "é")
+        )
+        XCTAssertEqual(ClaudeService.loginArguments, ["auth", "login", "--claudeai"])
+        let loginEnvironment = ClaudeService.loginEnvironment(
+            configDirectory: URL(fileURLWithPath: "/tmp/managed-login"),
+            inheritedEnvironment: [
+                "PATH": "/usr/bin",
+                "ANTHROPIC_API_KEY": "must-strip",
+                "CLAUDE_CODE_OAUTH_TOKEN": "must-strip",
+                "CLAUDE_CODE_USE_BEDROCK": "1"
+            ]
+        )
+        XCTAssertEqual(loginEnvironment["PATH"], "/usr/bin")
+        XCTAssertEqual(loginEnvironment["CLAUDE_CONFIG_DIR"], "/tmp/managed-login")
+        XCTAssertNil(loginEnvironment["ANTHROPIC_API_KEY"])
+        XCTAssertNil(loginEnvironment["CLAUDE_CODE_OAUTH_TOKEN"])
+        XCTAssertNil(loginEnvironment["CLAUDE_CODE_USE_BEDROCK"])
+        XCTAssertFalse(credential.needsRefresh(now: Date(timeIntervalSince1970: 1_700_000_000)))
+    }
+
+    func testRefreshRequestAndMergePreserveRotatedCredentialFields() throws {
+        let request = ClaudeService.makeRefreshRequest(refreshToken: "refresh-value")
+        XCTAssertEqual(request.httpMethod, "POST")
+        XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/x-www-form-urlencoded")
+        XCTAssertEqual(String(data: try XCTUnwrap(request.httpBody), encoding: .utf8), "client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e&grant_type=refresh_token&refresh_token=refresh-value")
+
+        let current = ManagedClaudeCredential(accessToken: "old", refreshToken: "old-refresh", expiresAtMilliseconds: nil, scopes: ["old"])
+        let response = Data("{\"access_token\":\"new\",\"refresh_token\":\"rotated\",\"expires_in\":3600,\"scope\":\"user:inference user:profile\"}".utf8)
+        let merged = try XCTUnwrap(ClaudeService.mergeRefreshResponse(response, into: current, now: Date(timeIntervalSince1970: 1_000)))
+        XCTAssertEqual(merged.accessToken, "new")
+        XCTAssertEqual(merged.refreshToken, "rotated")
+        XCTAssertEqual(merged.expiresAtMilliseconds, 4_600_000)
+        XCTAssertEqual(merged.scopes, ["user:inference", "user:profile"])
     }
 
     func testQuotaHTTPStatusErrorsAreDistinguished() {
@@ -130,6 +137,14 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertFalse(command.prompt.contains(ClaudeWarmupCommand.successMarker))
         XCTAssertFalse(command.arguments.contains("-p"))
         XCTAssertFalse(command.arguments.contains("--bare"))
+
+        let managedCommand = ClaudeWarmupCommand.make(
+            executableURL: URL(fileURLWithPath: "/tmp/fake-claude"),
+            oauthToken: "managed-access",
+            inheritedEnvironment: ["ANTHROPIC_API_KEY": "secret"]
+        )
+        XCTAssertEqual(managedCommand.environment["CLAUDE_CODE_OAUTH_TOKEN"], "managed-access")
+        XCTAssertNil(managedCommand.environment["ANTHROPIC_API_KEY"])
     }
 
     func testPTYWarmupRecognizesMarkerFromFakeExecutable() throws {

@@ -33,6 +33,9 @@ struct MenuContent: View {
         }
         .padding(16)
         .frame(width: 372)
+        .onAppear {
+            state.refreshSilently()
+        }
     }
 
     private var header: some View {
@@ -41,10 +44,7 @@ struct MenuContent: View {
                 Text("Claude Session Warmer")
                     .font(.headline)
                 Spacer()
-                if state.isWorking {
-                    ProgressView()
-                        .controlSize(.small)
-                }
+                connectionControl
             }
 
             HStack(spacing: 9) {
@@ -66,8 +66,8 @@ struct MenuContent: View {
                     progress: Double(state.handledWindowsToday) / 3
                 )
                 metricCard(
-                    value: state.currentQuota?.usedPercent.map { String(format: "%.0f%%", $0) } ?? "—",
-                    label: "5시간 사용량",
+                    value: usageValue,
+                    label: usageCaption,
                     progress: state.currentQuota?.usedPercent.map { $0 / 100 }
                 )
             }
@@ -145,7 +145,7 @@ struct MenuContent: View {
                 )
             )
             settingToggle(
-                "로그인 시 실행",
+                "Mac 로그인 시 앱 실행",
                 isOn: Binding(
                     get: { draftLaunchAtLogin },
                     set: {
@@ -168,17 +168,14 @@ struct MenuContent: View {
                 Spacer()
                 Button("저장") { saveDraft() }
                     .buttonStyle(.borderedProminent)
-                    .disabled((!hasDraftChanges && didSave) || draftWeekdays.isEmpty || state.isWorking)
+                    .disabled(!hasDraftChanges || draftWeekdays.isEmpty)
             }
         }
     }
 
     private var actions: some View {
-        HStack(spacing: 8) {
-            actionButton("지금 워밍", prominent: true) { state.manualWarmup() }
-            actionButton("새로고침") { state.refresh() }
-        }
-        .disabled(state.isWorking)
+        actionButton("지금 워밍", prominent: true) { state.manualWarmup() }
+            .disabled(state.isWorking)
     }
 
     private var footer: some View {
@@ -225,27 +222,92 @@ struct MenuContent: View {
         return (components.hour ?? 0) * 60 + (components.minute ?? 0)
     }
 
-    private func saveDraft() {
-        Task { @MainActor in
-            guard await state.prepareAndApplySettings(
-                firstWarmupDate: draftTime,
-                weekdays: draftWeekdays,
-                excludeKoreanHolidays: draftExcludeHolidays,
-                launchAtLogin: draftLaunchAtLogin
-            ) else { return }
+    private var usageValue: String {
+        guard let quota = state.currentQuota else { return "확인 필요" }
+        guard quota.active else { return "없음" }
+        return quota.usedPercent.map { String(format: "%.0f%%", $0) } ?? "—"
+    }
 
-            draftTime = state.firstWarmupDate
-            draftWeekdays = state.settings.weekdays
-            draftExcludeHolidays = state.settings.excludeKoreanHolidays
-            draftLaunchAtLogin = state.settings.launchAtLogin
-            didSave = true
+    private var usageCaption: String {
+        guard let quota = state.currentQuota else {
+            switch state.connectionState {
+            case .checking:
+                return "사용량 확인 중"
+            case .disconnected, .failed:
+                return "Claude 연결 필요"
+            case .connected:
+                return "사용량 확인 필요"
+            }
+        }
+        guard quota.active else { return "활성 5시간 창" }
+        guard let used = quota.usedPercent else { return "사용량 정보 없음" }
+        return String(format: "사용 · %.0f%% 남음", max(0, 100 - used))
+    }
+
+    private func saveDraft() {
+        guard state.applySettings(
+            firstWarmupDate: draftTime,
+            weekdays: draftWeekdays,
+            excludeKoreanHolidays: draftExcludeHolidays,
+            launchAtLogin: draftLaunchAtLogin
+        ) else { return }
+
+        draftTime = state.firstWarmupDate
+        draftWeekdays = state.settings.weekdays
+        draftExcludeHolidays = state.settings.excludeKoreanHolidays
+        draftLaunchAtLogin = state.settings.launchAtLogin
+        didSave = true
+    }
+
+    @ViewBuilder
+    private var connectionControl: some View {
+        switch state.connectionState {
+        case .disconnected:
+            Button {
+                state.connectClaude()
+            } label: {
+                Label("Claude 로그인", systemImage: "person.crop.circle.badge.plus")
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(state.isWorking)
+
+        case .checking:
+            HStack(spacing: 5) {
+                ProgressView()
+                    .controlSize(.mini)
+                Text("확인 중")
+            }
+            .font(.caption)
+            .padding(.horizontal, 9)
+            .padding(.vertical, 5)
+            .background(.secondary.opacity(0.1), in: Capsule())
+
+        case .connected:
+            Label("연결됨", systemImage: "checkmark.circle.fill")
+                .font(.caption)
+                .foregroundStyle(.green)
+                .padding(.horizontal, 9)
+                .padding(.vertical, 5)
+                .background(.green.opacity(0.1), in: Capsule())
+
+        case .failed:
+            Button {
+                state.connectClaude()
+            } label: {
+                Label("다시 연결", systemImage: "exclamationmark.circle")
+            }
+            .buttonStyle(.bordered)
+            .tint(.red)
+            .controlSize(.small)
+            .disabled(state.isWorking)
         }
     }
 
     private func metricCard(value: String, label: String, progress: Double?) -> some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(value)
-                .font(.title3.weight(.semibold))
+                .font(.title2.weight(.semibold))
                 .monospacedDigit()
             Text(label)
                 .font(.caption)

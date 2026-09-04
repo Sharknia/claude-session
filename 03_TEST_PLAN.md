@@ -2,9 +2,9 @@
 
 ## 1. 목적과 범위
 
-이 문서는 `REQ-001`~`REQ-013`과 `FLOW-001`~`FLOW-013`을 기준으로, MVP가 필요한 창만 안전하게 워밍하고 결과를 설명할 수 있는지 검증한다. 대상은 macOS 14+ SwiftUI 메뉴바 앱, Claude CLI·claude.ai 인증·Keychain, 실행 요일과 한국 공휴일, 일일 자동 3개 창, `five_hour.resets_at` 기반 후속 실행, PTY 최소 호출, 상태·수동 제어·알림·로그인 실행, 서명·공증 DMG다.
+이 문서는 `REQ-001`~`REQ-013`과 `FLOW-001`~`FLOW-013`을 기준으로, MVP가 필요한 창만 안전하게 워밍하고 결과를 설명할 수 있는지 검증한다. 대상은 macOS 14+ SwiftUI 메뉴바 앱, Claude CLI 위임 로그인과 단일 managed OAuth credential, 실행 요일과 한국 공휴일, 일일 자동 3개 창, `five_hour.resets_at` 기반 후속 실행, PTY 최소 호출, 상태·수동 제어·알림·로그인 실행, 서명·공증 DMG다.
 
-실제 절전·덮개 닫힘·종료·로그아웃 중 실행과 놓친 작업의 catch-up은 지원하지 않는다. Claude 서비스 자체의 가용성·과금 정책과 Mac 깨우기는 테스트 범위 밖이다.
+실제 절전·덮개 닫힘·종료 중 실행과 놓친 작업의 catch-up은 지원하지 않는다. 다중 Claude 계정·계정 전환·앱 내 Claude 로그아웃, Claude 서비스 자체의 가용성·과금 정책과 Mac 깨우기는 테스트 범위 밖이다.
 
 ## 2. 원칙과 레벨
 
@@ -23,6 +23,7 @@
 - 실제 배포 설정으로 서명한 Release 빌드와 내부 사용 중인 Claude CLI 버전
 - `FakeClock`: wall clock 이동, timer 발화, 앱 재시작을 독립 제어
 - `FakeCLI`: 정상, non-zero exit, hang, 미설치, 미인증을 반환하고 PTY/argv/stdin/호출 시각을 기록
+- `FakeOAuth`: expiry 임박, access·refresh 회전, 401 후 성공, `invalid_grant`, 네트워크 실패를 반환하고 refresh 횟수를 기록
 - `FakeQuotaProvider`: active/idle 창, `resets_at`, 반영 지연, 인증 오류, 429/오프라인, 잘못된 응답을 반환
 - 공휴일 fixture: 평일 공휴일, 대체공휴일, 주말 중첩 공휴일. 데이터 출처 버전을 고정
 - 자연스럽게 비활성 창이 생긴 내부 Claude 계정. 실제 비밀 값은 증거에 포함하지 않음
@@ -66,12 +67,12 @@
 - 기대: (a)는 예약과 결과 기록이 정상 동작한다. (b)는 `놓침`과 fallback을 기록하고 PTY를 실행하지 않는다.
 - 증거: 잠금 상태 최근 결과와 (b)의 복귀 후 spawn-count=0. 실제 sleep·덮개·종료·로그아웃 동작 보장은 테스트하지 않는다.
 
-### TC-AUTH-001 — CLI·claude.ai 인증·Keychain (P0, Integration+macOS)
+### TC-AUTH-001 — CLI 위임 로그인·managed OAuth·Keychain (P0, Integration+macOS)
 
 - 참조: `REQ-008`; `FLOW-001`, `FLOW-007`
-- 실행: 저장 시 Keychain 승인, 자동 no-UI source→cache fallback, 401·만료·cache 부재를 확인한다.
-- 기대: access token만 `AfterFirstUnlockThisDeviceOnly` cache에 저장하고 refresh token·UserDefaults·로그에는 남기지 않는다. 401·잠금은 잠금 해제 후 새로고침을 안내한다.
-- 증거: 상태 화면, 준비 전 spawn-count=0, Keychain 승인·거부 결과.
+- 실행: (a) 일정 저장만 수행한다. (b) Claude 로그인에서 기존 기본 credential이 있는 상태로 `claude auth login --claudeai` 성공·취소·실패를 실행한다. (c) expiry 임박과 usage 401을 주입한다. (d) refresh 실패·managed credential 부재·화면 잠금을 확인한다.
+- 기대: (a)는 OAuth·Keychain을 건드리지 않는다. (b)는 정확한 CLI 인자를 사용하고 앱 Keychain에 access·회전 refresh·expiry만 `AfterFirstUnlockThisDeviceOnly`로 저장한 뒤 모든 종료 경로에서 기존 기본 credential을 바이트 단위로 복구한다. (c)는 refresh를 한 번만 수행하고 새 credential 전체를 함께 저장한 뒤 usage를 한 번만 재시도한다. (d)는 인증 UI나 PTY 없이 해당 창을 실패 처리하고 잠금 해제 후 Claude 로그인을 안내하며, 첫 창 실패여도 fallback 2·3번째 창은 유지한다.
+- 증거: CLI argv, 원상복구 전후 hash, 앱 Keychain 속성, refresh/usage 호출 횟수, redacted credential 교체 기록, spawn-count=0.
 
 ### TC-PTY-001 — 최소 대화형 PTY와 실패 정리 (P0, Integration+macOS)
 
@@ -90,8 +91,8 @@
 ### TC-UI-001 — 상태·수동 제어·알림·로그인 실행 (P1, Integration+macOS)
 
 - 참조: `REQ-001`, `REQ-012`, `REQ-013`; `FLOW-011`, `FLOW-012`, `FLOW-013`
-- 실행: draft 변경 후 저장/미저장, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
-- 기대: 저장 전 예약은 유지되고, 메뉴에 상태 card·오늘 처리/사용량 metric cards·다음/리셋 schedule card와 동일폭 주요 동작이 보인다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다.
+- 실행: draft 변경 후 저장/미저장, 별도 Claude 로그인, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
+- 기대: 저장 전 예약은 유지되고 저장이 OAuth를 시작하지 않는다. Claude 로그인은 별도 사용자 동작으로만 시작한다. 메뉴에 상태 card·오늘 처리/사용량 metric cards·다음/리셋 schedule card와 동일폭 주요 동작이 보인다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다.
 - 증거: 제어 전후 next-run/상태, 호출 ledger, 알림과 process list.
 
 ### TC-DIST-001 — 서명·공증 DMG smoke (P0, Deployment)
@@ -138,6 +139,6 @@
 - **Blocked**: 환경·계정·외부 API로 실행/판정할 수 없다. Pass로 간주하지 않는다.
 - 자동 증거에는 fixture/Clock 시작점, 시간대, 창별 상태, quota/CLI 호출 ledger와 spawn-count를 포함한다.
 - macOS/수동 증거에는 빌드 hash, OS·CLI·앱 버전, 수행자, 시각, redacted 로그와 필요한 화면 캡처를 포함한다.
-- 토큰·cookie·Keychain 값·대화 전문·프로젝트 내용은 저장하거나 증거에 첨부하지 않는다.
+- 토큰·cookie·Keychain 원문·대화 전문·프로젝트 내용은 증거에 첨부하지 않는다. managed credential은 앱 Keychain 외 저장소와 로그에 남지 않아야 한다.
 
 내부 배포는 모든 P0 자동/macOS 테스트, secret 확인, `TC-DIST-001`, `TC-LIVE-001`이 Pass일 때만 허용한다. quota/CLI/인증 방식 변경 시 TC-AUTH-001, TC-PTY-001, TC-QUOTA-001, TC-LIVE-001을 재실행하고, scheduler 변경 시 TC-CORE-001~004를 재실행한다.

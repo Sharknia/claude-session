@@ -2,6 +2,13 @@ import Foundation
 import ServiceManagement
 import UserNotifications
 
+enum ClaudeConnectionState: Equatable {
+    case disconnected
+    case checking
+    case connected
+    case failed(String)
+}
+
 @MainActor
 final class AppState: ObservableObject {
     @Published private(set) var settings: ScheduleSettings
@@ -11,11 +18,13 @@ final class AppState: ObservableObject {
     @Published private(set) var status: WarmupStatus
     @Published private(set) var statusMessage: String
     @Published private(set) var isWorking = false
+    @Published private(set) var connectionState: ClaudeConnectionState = .disconnected
 
     private let store: SettingsStore
     private let engine: ScheduleEngine
     private var timer: Timer?
     private var startedTargetsThisRun: Set<Date> = []
+    private var isSilentRefreshRunning = false
 
     init(
         store: SettingsStore = SettingsStore(),
@@ -72,45 +81,6 @@ final class AppState: ObservableObject {
         return true
     }
 
-    @discardableResult
-    func prepareAndApplySettings(
-        firstWarmupDate: Date,
-        weekdays: Set<Int>,
-        excludeKoreanHolidays: Bool,
-        launchAtLogin: Bool
-    ) async -> Bool {
-        guard !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }), !isWorking else {
-            return false
-        }
-
-        isWorking = true
-        status = .checking
-        statusMessage = "자동 실행 권한 준비 중"
-        defer { isWorking = false }
-
-        do {
-            let inspection = try await Self.inspectForCredentialPreparation()
-            currentQuota = inspection.quota
-        } catch {
-            record(.failed, message: "설정 저장 실패: \(error.localizedDescription)")
-            store.saveDailyCycle(cycle)
-            return false
-        }
-
-        let applied = applySettings(
-            firstWarmupDate: firstWarmupDate,
-            weekdays: weekdays,
-            excludeKoreanHolidays: excludeKoreanHolidays,
-            launchAtLogin: launchAtLogin
-        )
-        let loginSettingApplied = settings.launchAtLogin == launchAtLogin
-        if applied, loginSettingApplied {
-            status = .idle
-            statusMessage = "설정과 자동 실행 권한을 저장했습니다."
-        }
-        return applied && loginSettingApplied
-    }
-
     private func applyLaunchAtLogin(_ enabled: Bool) {
         do {
             let currentStatus = SMAppService.mainApp.status
@@ -137,24 +107,46 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refresh() {
+    func connectClaude() {
         guard !isWorking else { return }
         isWorking = true
-        status = .checking
-        statusMessage = "Claude 상태 확인 중"
+        connectionState = .checking
 
         Task {
             do {
-                let inspection = try await Self.inspectClaude(allowsCredentialPrompt: true)
+                let inspection = try await Self.loginManagedClaude()
                 currentQuota = inspection.quota
+                connectionState = .connected
                 status = inspection.quota.active ? .satisfied : .idle
-                statusMessage = inspection.quota.active ? "활성 사용량 창을 확인했습니다." : "활성 사용량 창이 없습니다."
+                statusMessage = "Claude에 연결했습니다."
             } catch {
+                currentQuota = nil
+                updateConnectionFailure(error)
                 record(.failed, message: error.localizedDescription)
                 store.saveDailyCycle(cycle)
-                notifyFailure(statusMessage)
             }
             isWorking = false
+        }
+    }
+
+    func refreshSilently() {
+        guard !isWorking, !isSilentRefreshRunning else { return }
+        isSilentRefreshRunning = true
+
+        Task {
+            defer { isSilentRefreshRunning = false }
+            do {
+                let inspection = try await Self.inspectManagedClaude()
+                currentQuota = inspection.quota
+                connectionState = .connected
+            } catch {
+                currentQuota = nil
+                updateConnectionFailure(error)
+                if case .disconnected = connectionState, currentQuota == nil {
+                    status = .idle
+                    statusMessage = "Claude 연결이 필요합니다."
+                }
+            }
         }
     }
 
@@ -173,7 +165,8 @@ final class AppState: ObservableObject {
         Task {
             var attemptedTarget: Date?
             do {
-                var inspection = try await Self.inspectClaude(allowsCredentialPrompt: true)
+                var inspection = try await Self.inspectManagedClaude()
+                connectionState = .connected
                 var performedWarmup = false
                 if !inspection.quota.active {
                     guard !hasRecentWarmupAttempt(at: now) else {
@@ -185,9 +178,9 @@ final class AppState: ObservableObject {
                     attemptedTarget = target
                     status = .warming
                     statusMessage = "Claude 워밍 중"
-                    try await Self.runWarmup(cliURL: inspection.cliURL)
+                    try await Self.runManagedWarmup(cliURL: inspection.cliURL)
                     performedWarmup = true
-                    inspection = try await Self.inspectClaude(allowsCredentialPrompt: true)
+                    inspection = try await Self.inspectManagedClaude()
                 }
                 guard inspection.quota.active, inspection.quota.resetsAt != nil else {
                     throw AppStateError.quotaNotActivated
@@ -208,6 +201,7 @@ final class AppState: ObservableObject {
                 store.saveDailyCycle(cycle)
                 scheduleNext()
             } catch {
+                updateConnectionFailure(error)
                 if error as? ClaudeServiceError == .warmupNotStarted,
                    let attemptedTarget,
                    cycle.lastWarmupTargetAt == attemptedTarget {
@@ -215,7 +209,6 @@ final class AppState: ObservableObject {
                 }
                 record(.failed, message: "수동 워밍 실패: \(error.localizedDescription)")
                 store.saveDailyCycle(cycle)
-                notifyFailure(statusMessage)
             }
             isWorking = false
         }
@@ -281,7 +274,8 @@ final class AppState: ObservableObject {
 
         Task {
             do {
-                var inspection = try await Self.inspectClaude(allowsCredentialPrompt: false)
+                var inspection = try await Self.inspectManagedClaude()
+                connectionState = .connected
                 if isFreshWindow(inspection.quota, for: event) {
                     complete(event, quota: inspection.quota, status: .satisfied, message: "이미 열린 창을 확인했습니다.")
                 } else if inspection.quota.active {
@@ -293,14 +287,15 @@ final class AppState: ObservableObject {
                     store.saveDailyCycle(cycle)
                     status = .warming
                     statusMessage = "\(event.windowNumber)번째 창 워밍 중"
-                    try await Self.runWarmup(cliURL: inspection.cliURL)
-                    inspection = try await Self.inspectClaude(allowsCredentialPrompt: false)
+                    try await Self.runManagedWarmup(cliURL: inspection.cliURL)
+                    inspection = try await Self.inspectManagedClaude()
                     guard isFreshWindow(inspection.quota, for: event) else {
                         throw AppStateError.quotaNotActivated
                     }
                     complete(event, quota: inspection.quota, status: .succeeded, message: "워밍이 완료되었습니다.")
                 }
             } catch {
+                updateConnectionFailure(error)
                 if error as? ClaudeServiceError == .warmupNotStarted,
                    cycle.lastWarmupTargetAt == event.targetAt {
                     cycle.lastWarmupTargetAt = nil
@@ -476,30 +471,47 @@ final class AppState: ObservableObject {
         }
     }
 
-    private static func inspectForCredentialPreparation() async throws -> Inspection {
-        do {
-            return try await inspectClaude(allowsCredentialPrompt: false)
-        } catch let error as ClaudeServiceError
-            where error == .credentialsRequireManualRefresh || error == .quotaUnauthorized {
-            return try await inspectClaude(allowsCredentialPrompt: true)
+    private func updateConnectionFailure(_ error: Error) {
+        if error is AppStateError { return }
+        guard let serviceError = error as? ClaudeServiceError else {
+            connectionState = .failed(error.localizedDescription)
+            return
+        }
+        if serviceError == .managedCredentialsUnavailable {
+            connectionState = .disconnected
+        } else if serviceError != .warmupNotStarted,
+                  serviceError != .warmupTimedOut,
+                  serviceError != .warmupFailed {
+            connectionState = .failed(error.localizedDescription)
         }
     }
 
-    private static func inspectClaude(allowsCredentialPrompt: Bool) async throws -> Inspection {
+    private static func inspectManagedClaude() async throws -> Inspection {
         try await Task.detached(priority: .utility) {
             let service = ClaudeService()
             let cliURL = try service.locateCLI()
-            _ = try service.checkAuth(cliURL: cliURL)
-            let token = try service.readAccessToken(allowsInteraction: allowsCredentialPrompt)
-            let quota = try await service.fetchQuota(accessToken: token)
+            let quota = try await service.fetchManagedQuota()
             return Inspection(cliURL: cliURL, quota: quota)
         }.value
     }
 
-    private static func runWarmup(cliURL: URL) async throws {
+    private static func loginManagedClaude() async throws -> Inspection {
+        try await Task.detached(priority: .userInitiated) {
+            let service = ClaudeService()
+            let cliURL = try service.locateCLI()
+            _ = try await service.loginAndCapture(cliURL: cliURL)
+            let quota = try await service.fetchManagedQuota()
+            return Inspection(cliURL: cliURL, quota: quota)
+        }.value
+    }
+
+    private static func runManagedWarmup(cliURL: URL) async throws {
         try await Task.detached(priority: .utility) {
             let service = ClaudeService()
-            try service.performWarmup(command: ClaudeWarmupCommand.make(executableURL: cliURL))
+            let token = try service.managedAccessToken()
+            try service.performWarmup(
+                command: ClaudeWarmupCommand.make(executableURL: cliURL, oauthToken: token)
+            )
         }.value
     }
 }
