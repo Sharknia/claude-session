@@ -15,18 +15,19 @@
 
 - macOS 14 이상
 - Apple Silicon Mac
-- Claude Code 설치
 - Claude Code 설치 및 Claude.ai 유료 구독 계정
 
 ## Claude 인증
 
 일정 `저장`과 `Claude 로그인`은 별도 동작입니다. 저장은 시각·요일·공휴일·macOS 로그인 시 실행 설정만 적용하며 OAuth를 시작하지 않습니다.
 
-`Claude 로그인`을 선택하면 앱은 사용자 확인 후 `claude auth login --claudeai`에 로그인을 위임합니다. 로그인 전 기본 Claude Code credential을 임시 보관하고, 로그인 결과의 access token·회전형 refresh token·만료 시각을 앱 전용 Keychain에 `AfterFirstUnlockThisDeviceOnly`로 저장한 뒤 기본 credential을 원래 값으로 복구합니다. 앱은 이 단일 managed credential만 사용하며 다중 계정과 앱 내 로그아웃은 지원하지 않습니다.
+`Claude 로그인`을 선택하면 앱이 S256 PKCE와 임의 state를 만들고 `127.0.0.1`의 임시 포트에서 일회성 callback listener를 연 뒤 시스템 브라우저로 Claude 로그인을 시작합니다. callback의 code와 state를 검증해 authorization code를 토큰으로 직접 교환합니다. Claude Code 설치 여부만 확인하며 CLI 인증 명령이나 Claude Code Keychain은 사용하지 않습니다.
+
+access token·회전형 refresh token·만료 시각은 앱 전용 Keychain에만 `AfterFirstUnlockThisDeviceOnly`로 저장합니다. 일반적인 Developer ID 서명 빌드는 다른 앱 Keychain을 읽지 않으므로 cross-app 승인창 원인을 제거합니다. ad-hoc 또는 다시 서명한 개발 빌드는 앱 자체 Keychain ACL이 달라져 승인창이 나타날 수 있습니다.
 
 자동 예약은 인증 UI를 열지 않습니다. access token 만료가 가까우면 앱 전용 refresh token으로 자체 갱신하고, 새 access token·회전된 refresh token·만료 시각을 함께 교체합니다. 만료·401·refresh 실패 시 해당 창을 실패 처리해 후속 2·3번째 창 일정은 유지하고, 잠금 해제 후 `Claude 로그인`을 다시 실행하도록 안내합니다.
 
-이 방식은 Anthropic이 제3자 앱용으로 공식 승인한 Claude.ai OAuth 통합이 아닙니다. 사용자의 명시적 승인 아래 Claude Code OAuth client와 CLI 로그인 흐름을 활용하는 내부 MVP이며, Anthropic의 정책이나 OAuth 동작 변경으로 중단될 수 있습니다.
+이 방식은 Anthropic이 제3자 앱용으로 공식 승인한 Claude.ai OAuth 통합이 아닙니다. 사용자의 명시적 승인 아래 Claude Code OAuth client를 활용하는 내부 MVP이며, callback·token endpoint 또는 정책 변경으로 중단될 수 있습니다.
 
 ## 개발 검증
 
@@ -65,6 +66,6 @@ NOTARY_PROFILE="claude-session-notary" \
 
 ## 현재 상태
 
-managed Claude OAuth 단일계정 흐름과 자동화 테스트는 구현했습니다. 실제 브라우저 로그인, 기본 Claude Code credential 원상복구, 회전 refresh와 화면 잠금 상태 자동 실행은 내부 Mac에서 추가 검증해야 합니다.
+managed Claude OAuth 단일계정 흐름과 자동화 테스트는 구현했습니다. 실제 브라우저 callback·token exchange, 회전 refresh, Developer ID 빌드의 앱 Keychain과 화면 잠금 상태 자동 실행은 내부 Mac에서 추가 검증해야 합니다.
 
 비활성 사용량 창에서 PTY 워밍이 일반 Claude 구독의 새 5시간 창을 여는 라이브 앵커 검증은 아직 수행하지 않았습니다. 이 검증을 통과하기 전까지 배포 판단은 **CONDITIONAL GO**입니다.

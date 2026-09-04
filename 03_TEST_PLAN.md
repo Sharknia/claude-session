@@ -2,7 +2,7 @@
 
 ## 1. 목적과 범위
 
-이 문서는 `REQ-001`~`REQ-013`과 `FLOW-001`~`FLOW-013`을 기준으로, MVP가 필요한 창만 안전하게 워밍하고 결과를 설명할 수 있는지 검증한다. 대상은 macOS 14+ SwiftUI 메뉴바 앱, Claude CLI 위임 로그인과 단일 managed OAuth credential, 실행 요일과 한국 공휴일, 일일 자동 3개 창, `five_hour.resets_at` 기반 후속 실행, PTY 최소 호출, 상태·수동 제어·알림·로그인 실행, 서명·공증 DMG다.
+이 문서는 `REQ-001`~`REQ-013`과 `FLOW-001`~`FLOW-013`을 기준으로, MVP가 필요한 창만 안전하게 워밍하고 결과를 설명할 수 있는지 검증한다. 대상은 macOS 14+ SwiftUI 메뉴바 앱, direct browser OAuth PKCE와 단일 managed credential, Claude CLI 기반 PTY 워밍, 실행 요일과 한국 공휴일, 일일 자동 3개 창, `five_hour.resets_at` 기반 후속 실행, 상태·수동 제어·알림·macOS 로그인 시 실행, 서명·공증 DMG다.
 
 실제 절전·덮개 닫힘·종료 중 실행과 놓친 작업의 catch-up은 지원하지 않는다. 다중 Claude 계정·계정 전환·앱 내 Claude 로그아웃, Claude 서비스 자체의 가용성·과금 정책과 Mac 깨우기는 테스트 범위 밖이다.
 
@@ -23,7 +23,7 @@
 - 실제 배포 설정으로 서명한 Release 빌드와 내부 사용 중인 Claude CLI 버전
 - `FakeClock`: wall clock 이동, timer 발화, 앱 재시작을 독립 제어
 - `FakeCLI`: 정상, non-zero exit, hang, 미설치, 미인증을 반환하고 PTY/argv/stdin/호출 시각을 기록
-- `FakeOAuth`: expiry 임박, access·refresh 회전, 401 후 성공, `invalid_grant`, 네트워크 실패를 반환하고 refresh 횟수를 기록
+- `FakeOAuth`: listener bind·callback query, code/state, PKCE verifier, token request, expiry 임박, access·refresh 회전, 401 후 성공, `invalid_grant`, timeout을 제어하고 호출 횟수를 기록
 - `FakeQuotaProvider`: active/idle 창, `resets_at`, 반영 지연, 인증 오류, 429/오프라인, 잘못된 응답을 반환
 - 공휴일 fixture: 평일 공휴일, 대체공휴일, 주말 중첩 공휴일. 데이터 출처 버전을 고정
 - 자연스럽게 비활성 창이 생긴 내부 Claude 계정. 실제 비밀 값은 증거에 포함하지 않음
@@ -67,12 +67,13 @@
 - 기대: (a)는 예약과 결과 기록이 정상 동작한다. (b)는 `놓침`과 fallback을 기록하고 PTY를 실행하지 않는다.
 - 증거: 잠금 상태 최근 결과와 (b)의 복귀 후 spawn-count=0. 실제 sleep·덮개·종료·로그아웃 동작 보장은 테스트하지 않는다.
 
-### TC-AUTH-001 — CLI 위임 로그인·managed OAuth·Keychain (P0, Integration+macOS)
+### TC-AUTH-001 — direct browser OAuth PKCE·managed Keychain (P0, Integration+macOS)
 
 - 참조: `REQ-008`; `FLOW-001`, `FLOW-007`
-- 실행: (a) 일정 저장만 수행한다. (b) Claude 로그인에서 기존 기본 credential이 있는 상태로 `claude auth login --claudeai` 성공·취소·실패를 실행한다. (c) expiry 임박과 usage 401을 주입한다. (d) refresh 실패·managed credential 부재·화면 잠금을 확인한다.
-- 기대: (a)는 OAuth·Keychain을 건드리지 않는다. (b)는 정확한 CLI 인자를 사용하고 앱 Keychain에 access·회전 refresh·expiry만 `AfterFirstUnlockThisDeviceOnly`로 저장한 뒤 모든 종료 경로에서 기존 기본 credential을 바이트 단위로 복구한다. (c)는 refresh를 한 번만 수행하고 새 credential 전체를 함께 저장한 뒤 usage를 한 번만 재시도한다. (d)는 인증 UI나 PTY 없이 해당 창을 실패 처리하고 잠금 해제 후 Claude 로그인을 안내하며, 첫 창 실패여도 fallback 2·3번째 창은 유지한다.
-- 증거: CLI argv, 원상복구 전후 hash, 앱 Keychain 속성, refresh/usage 호출 횟수, redacted credential 교체 기록, spawn-count=0.
+- 실행: (a) 일정 저장만 수행한다. (b) `127.0.0.1` ephemeral listener의 정상 callback, 잘못된 path/method, state mismatch, bind 실패·timeout·취소를 주입한다. (c) authorize URL과 authorization-code token request를 검사한다. (d) expiry 임박과 usage 401, refresh 실패·managed credential 부재·화면 잠금을 확인한다.
+- 기대: (a)는 OAuth·Keychain을 건드리지 않는다. (b)는 localhost callback만 수락하고 S256 PKCE·state를 검증하며 listener를 항상 종료한다. (c)는 시스템 브라우저를 사용해 authorization code를 직접 교환하고 수동 paste fallback이나 CLI auth subprocess를 호출하지 않는다. Claude Code Keychain에 접근하지 않고 앱 Keychain에 access·회전 refresh·expiry만 `AfterFirstUnlockThisDeviceOnly`로 저장한다. (d)는 refresh를 한 번만 수행하고 새 credential 전체를 함께 저장한 뒤 usage를 한 번만 재시도한다. 실패 시 인증 UI나 PTY 없이 해당 창을 실패 처리하고 첫 창 실패여도 fallback 2·3번째 창을 유지한다.
+- 보안 증거: callback parser·listener 종료, state mismatch와 timeout 결과, authorize URL의 S256 challenge, token request의 grant/code/redirect URI/client ID/verifier/state, 앱 Keychain 속성, refresh/usage 호출 횟수와 spawn-count=0을 기록한다. 토큰·authorization code는 로그와 테스트 실패 메시지에 남기지 않는다.
+- 실기기 판정: 일반 Developer ID 빌드의 로그인에서 cross-app Keychain 승인창이 없어야 한다. ad-hoc·재서명 개발 빌드의 앱 자체 Keychain ACL prompt는 별도로 기록하고 배포 결과로 간주하지 않는다.
 
 ### TC-PTY-001 — 최소 대화형 PTY와 실패 정리 (P0, Integration+macOS)
 
@@ -91,7 +92,7 @@
 ### TC-UI-001 — 상태·수동 제어·알림·로그인 실행 (P1, Integration+macOS)
 
 - 참조: `REQ-001`, `REQ-012`, `REQ-013`; `FLOW-011`, `FLOW-012`, `FLOW-013`
-- 실행: draft 변경 후 저장/미저장, 별도 Claude 로그인, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
+- 실행: draft 변경 후 저장/미저장, 별도 direct browser Claude 로그인, 수동 워밍, 알림 허용/거부, macOS 로그인 시 실행 on/off를 확인한다.
 - 기대: 저장 전 예약은 유지되고 저장이 OAuth를 시작하지 않는다. Claude 로그인은 별도 사용자 동작으로만 시작한다. 메뉴에 상태 card·오늘 처리/사용량 metric cards·다음/리셋 schedule card와 동일폭 주요 동작이 보인다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다.
 - 증거: 제어 전후 next-run/상태, 호출 ledger, 알림과 process list.
 
@@ -123,7 +124,7 @@
 | `REQ-005` 실제 `resets_at` | `FLOW-003`, `FLOW-004`, `FLOW-006`, `FLOW-010`, `FLOW-011` | TC-CORE-001, TC-QUOTA-001, TC-LIVE-001 |
 | `REQ-006` T 정시 확인 | `FLOW-003`, `FLOW-004`, `FLOW-006` | TC-CORE-001, TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
 | `REQ-007` 제한 재시도·중복 방지 | `FLOW-003`, `FLOW-004`, `FLOW-006`, `FLOW-008`, `FLOW-010`, `FLOW-013` | TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
-| `REQ-008` CLI·인증 탐지 | `FLOW-001`, `FLOW-003`, `FLOW-007`, `FLOW-008`, `FLOW-011`, `FLOW-013` | TC-AUTH-001 |
+| `REQ-008` browser OAuth 인증 | `FLOW-001`, `FLOW-003`, `FLOW-007`, `FLOW-008`, `FLOW-011`, `FLOW-013` | TC-AUTH-001 |
 | `REQ-009` quota 어댑터 | `FLOW-001`, `FLOW-003`, `FLOW-007`, `FLOW-008` | TC-QUOTA-001, TC-LIVE-001 |
 | `REQ-010` 최소 PTY | `FLOW-001`, `FLOW-003`, `FLOW-008`, `FLOW-013` | TC-PTY-001, TC-LIVE-001 |
 | `REQ-011` 잠금/화면 꺼짐 | `FLOW-009`, `FLOW-010` | TC-OS-001 |

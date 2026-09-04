@@ -41,6 +41,7 @@ Claude Code 구독 사용자는 사용량 창이 새로 열리는 시점에 맞�
 - 비용 분석, 자동 업데이트, Mac 깨우기
 - 시스템 잠자기, 덮개 닫힘, 종료, 로그아웃 중 실행 보장 또는 놓친 실행 따라잡기
 - 다중 Claude 계정, 계정 전환, 앱 내 Claude 로그아웃
+- 수동 authorization code 붙여넣기 fallback
 
 ## 3. 대상 사용자
 
@@ -77,7 +78,7 @@ Claude Code가 설치되어 있고 Claude.ai 유료 구독 계정을 사용하�
 
 - macOS 14 이상용 SwiftUI 네이티브 메뉴바 앱
 - Claude CLI 설치 탐지와 별도 `Claude 로그인` 동작
-- `claude auth login --claudeai` 위임, 기본 Claude Code credential 임시 보관·원상복구
+- 시스템 브라우저, S256 PKCE·state 검증과 `127.0.0.1` 임시 callback listener를 사용하는 authorization-code 로그인
 - 앱 전용 Keychain의 단일 managed OAuth credential(access token, 회전형 refresh token, 만료 시각)
 - 자동 실행의 no-UI 만료 사전 갱신과 401 후 1회 refresh·재시도
 - 비공개 `/api/oauth/usage` 사용량 조회 어댑터
@@ -94,13 +95,13 @@ Claude Code가 설치되어 있고 Claude.ai 유료 구독 계정을 사용하�
 | ID | 요구사항 | 수용 기준 |
 | --- | --- | --- |
 | REQ-001 | 앱은 macOS 14+에서 동작하는 SwiftUI 네이티브 메뉴바 앱이어야 한다. | Dock 중심 앱이 아닌 메뉴바에서 상태와 주요 제어를 제공한다. |
-| REQ-002 | 사용자는 첫 워밍 시각 하나와 실행 요일을 draft로 설정·변경하고 명시적으로 저장할 수 있어야 한다. | 저장 전에는 예약을 바꾸지 않으며, 저장은 Claude 로그인이나 Keychain 승인을 시작하지 않는다. |
+| REQ-002 | 사용자는 첫 워밍 시각 하나와 실행 요일을 draft로 설정·변경하고 명시적으로 저장할 수 있어야 한다. | 저장 전에는 예약을 바꾸지 않으며, 저장은 Claude 로그인을 시작하지 않는다. |
 | REQ-003 | 사용자는 대한민국 공휴일 제외 여부를 설정할 수 있어야 하며 기본값은 제외여야 한다. | 제외가 켜진 공휴일에는 첫·후속 워밍을 예약하지 않고, 꺼진 경우 선택 요일 규칙만 적용한다. |
 | REQ-004 | 일일 자동 워밍은 첫 1회와 후속 최대 2회로 제한되어야 한다. | 성공·실패·놓침과 관계없이 같은 실행일의 처리 대상은 3개를 넘지 않는다. |
 | REQ-005 | 후속 워밍은 실제 `five_hour.resets_at`을 우선 기준으로 계획해야 한다. | `resets_at`이 없으면 실패·놓침의 `targetAt + 5시간` fallback으로 다음 정시 상태 확인을 예약한다. |
 | REQ-006 | 각 창은 예정 시각 T에 상태를 확인해야 한다. | 새 창이 이미 활성화됐으면 호출하지 않고 충족 결과를 기록한다. |
 | REQ-007 | 정시 시도 이력이 있는 호출 실패만 T부터 +3분 이내에 제한 재시도해야 하며 중복 호출을 막아야 한다. | 정시 이력 없는 과거 창은 PTY 없이 `missed` 처리하고, 메시지 전송 가능성이 있으면 상태 확인만 재시도한다. |
-| REQ-008 | `Claude 로그인`은 `claude auth login --claudeai`에 위임하고 기존 기본 credential을 보존해야 한다. | 로그인 결과를 앱 Keychain에 저장한 뒤 성공·실패와 관계없이 기존 기본 credential을 원상복구한다. |
+| REQ-008 | `Claude 로그인`은 앱의 direct browser OAuth PKCE로 수행해야 한다. | `127.0.0.1` 임시 listener, localhost callback, S256 PKCE와 state 검증 후 authorization code를 토큰으로 교환하며 CLI 인증 subprocess와 Claude Code Keychain을 사용하지 않는다. |
 | REQ-009 | 앱은 단일 managed OAuth credential과 비공개 `/api/oauth/usage`를 격리해 관리해야 한다. | access·회전 refresh·expiry를 `AfterFirstUnlockThisDeviceOnly`로 저장하고 자동 실행은 UI 없이 만료 또는 401에서 최대 1회 refresh한다. |
 | REQ-010 | 워밍 호출은 managed access token을 사용하는 PTY 대화형 최소 호출만 사용하고 `claude -p`를 사용하지 않아야 한다. | 호출 경로가 PTY이며 도구 실행, 프로젝트 문맥, 대화 저장을 비활성화한다. |
 | REQ-011 | 화면 잠금 및 디스플레이 꺼짐 상태에서는 예정 실행을 지원해야 한다. | 해당 상태에서 예약 시각이 되면 정상 처리 또는 명시적 실패 기록이 남는다. |
@@ -110,7 +111,8 @@ Claude Code가 설치되어 있고 Claude.ai 유료 구독 계정을 사용하�
 ## 7. 비기능 요구사항
 
 - **신뢰성:** 단일 실행 조정기와 창별 상태 식별자로 동시·중복 호출을 방지한다. 앱 재시작 후에도 당일 처리 수를 복원한다.
-- **개인정보·보안:** 앱 전용 access token·회전형 refresh token·expiry는 `AfterFirstUnlockThisDeviceOnly` Keychain에만 저장한다. refresh는 단일 실행으로 직렬화하고 회전된 credential 전체를 함께 교체한다. 토큰은 로그·UserDefaults에 남기지 않으며 기본 Claude Code credential은 로그인 뒤 원상복구한다.
+- **개인정보·보안:** 앱 전용 access token·회전형 refresh token·expiry는 `AfterFirstUnlockThisDeviceOnly` Keychain에만 저장한다. refresh는 단일 실행으로 직렬화하고 회전된 credential 전체를 함께 교체하며 토큰은 로그·UserDefaults에 남기지 않는다.
+- **Keychain 경계:** Claude Code Keychain에는 접근하지 않는다. 일반 서명 빌드는 앱이 만든 항목만 읽으며, ad-hoc·재서명 빌드의 자체 ACL 승인 가능성은 Developer ID 게이트로 분리한다.
 - **호환성:** macOS 14 이상만 지원한다. 화면 잠금/디스플레이 꺼짐은 지원 범위이나, 시스템 잠자기 등 명시적 미지원 상태의 실행 보장은 제공하지 않는다.
 - **관측성:** 최근 결과에는 예정 창, 상태 점검 결과, 실제 호출 여부, 실패 이유, 재시도 여부와 시각을 표시한다.
 - **유지보수성:** 비공개 API의 인증·응답 파싱은 어댑터로 격리하고, 변경·차단 시 앱 전체가 아닌 해당 어댑터와 검증 테스트를 교체할 수 있어야 한다.
@@ -121,7 +123,7 @@ Claude Code가 설치되어 있고 Claude.ai 유료 구독 계정을 사용하�
 - 각 창에서 새 창 활성화가 확인되면 Claude 호출 수가 0회이며, 필요할 때도 창당 중복 PTY 호출이 발생하지 않는다.
 - 화면 잠금 및 디스플레이 꺼짐 조건의 내부 검증에서 예정 실행과 결과 기록이 확인된다.
 - CLI 미설치, 미인증, 사용량 조회 실패, PTY 호출 실패가 사용자에게 식별 가능한 결과와 알림으로 나타난다.
-- Claude 로그인 전후 기본 Claude Code credential이 동일하고, 앱 credential 만료·401에서 회전 refresh가 중복 없이 완료된다.
+- OAuth callback의 PKCE·state 검증과 앱 credential 만료·401의 회전 refresh가 중복 없이 완료된다.
 - 내부 배포 DMG가 서명·공증 검증을 통과하고 로그인 실행을 포함한 기본 제어가 동작한다.
 
 ## 9. 리스크와 가정
@@ -131,8 +133,9 @@ Claude Code가 설치되어 있고 Claude.ai 유료 구독 계정을 사용하�
 | 비공개 API 변경 | `/api/oauth/usage`는 공개·안정 계약이 아닐 수 있다. | 어댑터로 격리하고 실패를 사용자에게 명확히 표시한다. 변경 대응은 내부 운영 판단이다. |
 | 핵심 동작 미검증 | 비활성 사용량 창에서 PTY 최소 호출이 실제로 새 5시간 창을 열고 `resets_at`를 호출 시각 + 5시간으로 만드는지 라이브 검증되지 않았다. | 출시 전 CONDITIONAL GO 게이트로 검증한다. 실패 또는 재현 불가면 MVP를 배포하지 않는다. |
 | OS 전원 상태 | 시스템 잠자기, 덮개 닫힘, 종료, 로그아웃 시 예약 실행이 보장되지 않는다. | MVP 미지원으로 명시하고 놓친 실행을 따라잡지 않는다. Mac 깨우기 기능도 추가하지 않는다. |
-| 인증 변화 | Claude CLI 또는 claude.ai 인증 방식이 바뀔 수 있다. | managed access·refresh·expiry를 앱 Keychain에만 저장하고 실패 시 잠금 해제 후 재로그인을 안내한다. |
+| 인증 변화 | Claude OAuth callback·token endpoint 또는 scope가 바뀔 수 있다. | 로그인 라이브 게이트로 차단하고 실패 시 잠금 해제 후 재로그인을 안내한다. |
 | 비공식 OAuth 활용 | Claude Code OAuth client를 사용자 승인 아래 활용하지만 Anthropic이 승인한 제3자 OAuth 통합은 아니다. | 내부 MVP로 명시하고 정책·client·scope·endpoint 변경 시 배포를 중단해 재검토한다. |
+| 개발 빌드 Keychain ACL | ad-hoc 또는 재서명 빌드는 앱 자체 Keychain 접근에서 승인창이 나타날 수 있다. | 내부 배포는 동일 Developer ID 서명으로 검증하고 개발 빌드 현상을 배포 동작으로 일반화하지 않는다. |
 | 공휴일 데이터 | 포함된 2026~2027년 이후에는 데이터가 부족하다. | 지원 연도를 UI에 표시하고 이후 연도 지원은 앱 업데이트로 판단한다. |
 
 ## 10. 출시 게이트
@@ -143,7 +146,7 @@ Claude Code가 설치되어 있고 Claude.ai 유료 구독 계정을 사용하�
 2. 호출 전후 사용량 상태를 기록하여, 호출이 새 창 활성화로 이어지는지 확인한다.
 3. 확인된 `five_hour.resets_at`가 호출 시각을 기준으로 약 5시간 후로 설정되는지 검증한다.
 4. 같은 창에서 정시 확인·제한 재시도 흐름이 중복 호출 없이 작동하는지 검증한다.
-5. `claude auth login --claudeai` 위임 전후 기본 credential 원상복구와 앱 credential의 회전 refresh를 검증한다.
+5. localhost callback, PKCE·state 검증, token exchange와 앱 credential의 회전 refresh를 검증한다.
 6. 화면 잠금 및 디스플레이 꺼짐 조건, CLI 미설치·미인증·refresh/API 실패·PTY 실패 조건을 내부 테스트로 확인한다.
 7. Developer ID 서명 및 공증된 DMG의 설치·로그인 실행·메뉴바 제어를 확인한다.
 

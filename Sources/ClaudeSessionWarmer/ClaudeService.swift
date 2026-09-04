@@ -1,7 +1,7 @@
+import AppKit
 import Foundation
-import Security
 import LocalAuthentication
-import CryptoKit
+import Security
 import Darwin
 
 private let claudeAuthEnvironmentKeys = [
@@ -20,6 +20,7 @@ enum ClaudeServiceError: LocalizedError, Equatable {
     case credentialsUnavailable
     case managedCredentialsUnavailable
     case loginCaptureFailed
+    case oauthLoginTimedOut
     case oauthRefreshFailed
     case invalidUsageResponse
     case quotaUnauthorized
@@ -35,6 +36,7 @@ enum ClaudeServiceError: LocalizedError, Equatable {
         case .credentialsUnavailable: return "앱 전용 Claude 인증 정보를 Keychain에서 읽거나 저장하지 못했습니다."
         case .managedCredentialsUnavailable: return "Claude 연결이 필요합니다. Claude 로그인을 눌러 주세요."
         case .loginCaptureFailed: return "Claude 로그인 뒤 OAuth 인증 정보를 가져오지 못했습니다."
+        case .oauthLoginTimedOut: return "Claude 로그인이 시간 안에 완료되지 않았습니다. 다시 시도해 주세요."
         case .oauthRefreshFailed: return "Claude 연결을 갱신하지 못했습니다. Mac 잠금을 해제한 뒤 다시 연결해 주세요."
         case .invalidUsageResponse: return "사용량 응답 형식이 올바르지 않습니다."
         case .quotaUnauthorized: return "Claude 인증이 만료됐을 수 있습니다. Mac 잠금을 해제한 뒤 다시 연결해 주세요."
@@ -140,46 +142,8 @@ struct ClaudeWarmupCommand: Equatable {
 }
 
 enum ClaudeCredentialQueries {
-    static let sourceService = "Claude Code-credentials"
     static let cacheService = "com.sharknia.ClaudeSessionWarmer.oauth"
     static let cacheAccount = "claude-managed-credential"
-
-    static func source(allowsInteraction: Bool) -> [CFString: Any] {
-        source(service: sourceService, allowsInteraction: allowsInteraction)
-    }
-
-    static func source(service: String, allowsInteraction: Bool) -> [CFString: Any] {
-        var query: [CFString: Any] = [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: sourceAccount(),
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne
-        ]
-        if !allowsInteraction {
-            query[kSecUseAuthenticationContext] = nonInteractiveContext()
-        }
-        return query
-    }
-
-    static func sourceMutation(service: String) -> [CFString: Any] {
-        [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: service,
-            kSecAttrAccount: sourceAccount()
-        ]
-    }
-
-    static func sourceAccount(
-        environment: [String: String] = ProcessInfo.processInfo.environment,
-        systemUsername: String = NSUserName()
-    ) -> String {
-        let candidate = environment["USER"].flatMap { $0.isEmpty ? nil : $0 } ?? systemUsername
-        let allowed = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._-")
-        return !candidate.isEmpty && candidate.unicodeScalars.allSatisfy(allowed.contains)
-            ? candidate
-            : "claude-code-user"
-    }
 
     static func cacheRead() -> [CFString: Any] {
         [
@@ -249,22 +213,15 @@ private struct KeychainStatusError: Error {
     let status: OSStatus
 }
 
-enum LegacyCredentialSnapshot: Equatable {
-    case value(Data)
-    case absent
-    case unavailableWithoutInteraction
-}
-
 final class ClaudeService {
-    static let loginArguments = ["auth", "login", "--claudeai"]
     private static let knownCLIPaths = [
         "~/.local/bin/claude",
         "/opt/homebrew/bin/claude",
         "/usr/local/bin/claude"
     ]
     private static let refreshCoordinator = ManagedCredentialRefreshCoordinator()
-    private static let oauthTokenURL = URL(string: "https://platform.claude.com/v1/oauth/token")!
-    private static let oauthClientID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
+    private static let oauthTokenURL = ClaudeOAuthFlow.tokenURL
+    private static let oauthClientID = ClaudeOAuthFlow.clientID
 
     func locateCLI() throws -> URL {
         let fileManager = FileManager.default
@@ -294,203 +251,58 @@ final class ClaudeService {
         return data
     }
 
-    private func copyOptionalData(for query: [CFString: Any]) throws -> Data? {
-        do {
-            return try copyData(for: query)
-        } catch let error as KeychainStatusError where error.status == errSecItemNotFound {
-            return nil
-        }
-    }
-
-    private func restoreLegacyFallback(_ snapshot: LegacyCredentialSnapshot) throws {
-        switch snapshot {
-        case .value(let data):
-            try upsertSourceCredential(data, service: ClaudeCredentialQueries.sourceService)
-        case .absent:
-            deleteSourceCredential(service: ClaudeCredentialQueries.sourceService)
-        case .unavailableWithoutInteraction:
-            return
-        }
-    }
-
-    private func restoreLegacyIfChanged(from snapshot: LegacyCredentialSnapshot) throws {
-        let current = readLegacySnapshotWithoutInteraction()
-        guard Self.legacyCredentialChanged(from: snapshot, to: current) else { return }
-        try restoreLegacyFallback(snapshot)
-    }
-
-    private func upsertSourceCredential(_ data: Data, service: String) throws {
-        let query = ClaudeCredentialQueries.sourceMutation(service: service)
-        let status = SecItemUpdate(query as CFDictionary, [kSecValueData: data] as CFDictionary)
-        if status == errSecItemNotFound {
-            var insert = query
-            insert[kSecValueData] = data
-            let addStatus = SecItemAdd(insert as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw KeychainStatusError(status: addStatus) }
-        } else if status != errSecSuccess {
-            throw KeychainStatusError(status: status)
-        }
-    }
-
-    private func deleteSourceCredential(service: String) {
-        _ = SecItemDelete(ClaudeCredentialQueries.sourceMutation(service: service) as CFDictionary)
-    }
-
-    private func readLegacySnapshotWithoutInteraction() -> LegacyCredentialSnapshot {
-        do {
-            if let data = try copyOptionalData(for: ClaudeCredentialQueries.source(allowsInteraction: false)) {
-                return .value(data)
-            }
-            return .absent
-        } catch {
-            return .unavailableWithoutInteraction
-        }
-    }
-
-    private func restoreManagedCredential(_ snapshot: Data?) throws {
-        if let snapshot {
-            try storeManagedCredentialData(snapshot)
-        } else {
-            _ = SecItemDelete(ClaudeCredentialQueries.cacheUpdateQuery() as CFDictionary)
-        }
-    }
-
-    private func runInteractiveLogin(cliURL: URL, configDirectory: URL) throws {
-        var masterFD: Int32 = -1
-        var slaveFD: Int32 = -1
-        guard openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 else { throw ClaudeServiceError.warmupNotStarted }
-        defer {
-            if masterFD >= 0 { close(masterFD) }
-            if slaveFD >= 0 { close(slaveFD) }
-        }
-        let process = Process()
-        process.executableURL = cliURL
-        process.arguments = Self.loginArguments
-        process.environment = Self.loginEnvironment(configDirectory: configDirectory)
-        process.currentDirectoryURL = configDirectory
-        let slave = FileHandle(fileDescriptor: slaveFD, closeOnDealloc: false)
-        process.standardInput = slave
-        process.standardOutput = slave
-        process.standardError = slave
-        do { try process.run() } catch { throw ClaudeServiceError.warmupNotStarted }
-        close(slaveFD)
-        slaveFD = -1
-        _ = fcntl(masterFD, F_SETFL, fcntl(masterFD, F_GETFL) | O_NONBLOCK)
-        let deadline = Date().addingTimeInterval(180)
-        while process.isRunning && Date() < deadline {
-            var buffer = [UInt8](repeating: 0, count: 4096)
-            _ = read(masterFD, &buffer, buffer.count) // Drain without retaining browser/login output.
-            usleep(50_000)
-        }
-        guard !process.isRunning else {
-            Self.stopProcess(process)
-            throw ClaudeServiceError.loginCaptureFailed
-        }
-        process.waitUntilExit()
-        guard process.terminationStatus == 0 else { throw ClaudeServiceError.loginCaptureFailed }
-    }
-
-    static func loginEnvironment(
-        configDirectory: URL,
-        inheritedEnvironment: [String: String] = ProcessInfo.processInfo.environment
-    ) -> [String: String] {
-        var environment = inheritedEnvironment
-        claudeAuthEnvironmentKeys.forEach { environment.removeValue(forKey: $0) }
-        environment["CLAUDE_CONFIG_DIR"] = configDirectory.path
-        return environment
-    }
-
-    static func scopedClaudeService(for configPath: String) -> String {
-        let canonical = configPath.precomposedStringWithCanonicalMapping
-        let digest = SHA256.hash(data: Data(canonical.utf8)).map { String(format: "%02x", $0) }.joined()
-        return "\(ClaudeCredentialQueries.sourceService)-\(digest.prefix(8))"
-    }
-
-    static func formURLEncoded(_ values: [String: String]) -> Data? {
-        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
-        let body = values.map { key, value in
-            let encodedKey = key.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
-            let encodedValue = value.addingPercentEncoding(withAllowedCharacters: allowed) ?? ""
-            return "\(encodedKey)=\(encodedValue)"
-        }.sorted().joined(separator: "&")
-        return Data(body.utf8)
-    }
-
     func managedAccessToken() throws -> String {
         try readManagedCredential().accessToken
     }
 
-    func loginAndCapture(cliURL: URL) async throws -> ManagedClaudeCredential {
-        let temporaryDirectory = FileManager.default.temporaryDirectory
-            .appendingPathComponent("ClaudeSessionWarmer-login-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: temporaryDirectory, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: temporaryDirectory) }
-        let canonicalPath = temporaryDirectory.resolvingSymlinksInPath().path.precomposedStringWithCanonicalMapping
-        let scopedService = Self.scopedClaudeService(for: canonicalPath)
-        let legacySnapshot = readLegacySnapshotWithoutInteraction()
-        let managedSnapshot: Data?
-        do {
-            managedSnapshot = try copyOptionalData(for: ClaudeCredentialQueries.cacheRead())
-        } catch is KeychainStatusError {
-            throw ClaudeServiceError.credentialsUnavailable
+    func loginAndCapture(cliURL: URL, session: URLSession = .shared) async throws -> ManagedClaudeCredential {
+        guard FileManager.default.isExecutableFile(atPath: cliURL.path) else {
+            throw ClaudeServiceError.cliNotFound
         }
+
         do {
-            try runInteractiveLogin(cliURL: cliURL, configDirectory: temporaryDirectory)
-            let scoped: Data?
-            do {
-                scoped = try copyOptionalData(
-                    for: ClaudeCredentialQueries.source(service: scopedService, allowsInteraction: true)
-                )
-            } catch is KeychainStatusError {
+            let listener = try ClaudeOAuthLoopback()
+            let verifier = ClaudeOAuthFlow.randomURLSafeString()
+            let state = ClaudeOAuthFlow.randomURLSafeString()
+            let authorizeURL = try ClaudeOAuthFlow.authorizeURL(
+                codeChallenge: ClaudeOAuthFlow.codeChallenge(for: verifier),
+                state: state,
+                redirectURI: listener.redirectURI
+            )
+            let opened = await MainActor.run { NSWorkspace.shared.open(authorizeURL) }
+            guard opened else { throw ClaudeServiceError.loginCaptureFailed }
+
+            let callback = try await withTaskCancellationHandler {
+                try await Task.detached(priority: .userInitiated) {
+                    try listener.wait(expectedState: state, timeout: 300)
+                }.value
+            } onCancel: {
+                listener.stop()
+            }
+            guard callback.error == nil,
+                  callback.state == state,
+                  let code = callback.code,
+                  !code.isEmpty else {
                 throw ClaudeServiceError.loginCaptureFailed
             }
-            let captured: Data?
-            if let scoped {
-                captured = scoped
-            } else {
-                let legacy = try? copyData(for: ClaudeCredentialQueries.source(allowsInteraction: true))
-                if Self.shouldUseLegacyFallback(snapshot: legacySnapshot, captured: legacy) {
-                    captured = legacy
-                } else {
-                    captured = nil
-                }
-            }
-            guard let captured else {
+
+            let request = try ClaudeOAuthFlow.makeTokenRequest(
+                code: code,
+                verifier: verifier,
+                state: state,
+                redirectURI: listener.redirectURI
+            )
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
                 throw ClaudeServiceError.loginCaptureFailed
             }
-            let credential = try Self.parseManagedCredential(from: captured)
+            let credential = try ClaudeOAuthFlow.parseTokenResponse(data)
             try storeManagedCredential(credential)
-            deleteSourceCredential(service: scopedService)
-            try restoreLegacyIfChanged(from: legacySnapshot)
             return credential
-        } catch {
-            deleteSourceCredential(service: scopedService)
-            try? restoreLegacyIfChanged(from: legacySnapshot)
-            try? restoreManagedCredential(managedSnapshot)
+        } catch let error as ClaudeServiceError {
             throw error
-        }
-    }
-
-    static func shouldUseLegacyFallback(snapshot: LegacyCredentialSnapshot, captured: Data?) -> Bool {
-        guard let captured else { return false }
-        switch snapshot {
-        case .value(let prior): return captured != prior
-        case .absent: return true
-        case .unavailableWithoutInteraction: return false
-        }
-    }
-
-    static func legacyCredentialChanged(
-        from snapshot: LegacyCredentialSnapshot,
-        to current: LegacyCredentialSnapshot
-    ) -> Bool {
-        switch (snapshot, current) {
-        case (.value(let prior), .value(let latest)):
-            return prior != latest
-        case (.value, .absent), (.absent, .value):
-            return true
-        case (.absent, .absent), (_, .unavailableWithoutInteraction), (.unavailableWithoutInteraction, _):
-            return false
+        } catch {
+            throw ClaudeServiceError.loginCaptureFailed
         }
     }
 
@@ -557,11 +369,13 @@ final class ClaudeService {
     static func makeRefreshRequest(refreshToken: String) -> URLRequest {
         var request = URLRequest(url: oauthTokenURL)
         request.httpMethod = "POST"
-        request.setValue("application/x-www-form-urlencoded", forHTTPHeaderField: "Content-Type")
-        request.httpBody = formURLEncoded([
+        request.timeoutInterval = 30
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try? JSONSerialization.data(withJSONObject: [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
-            "client_id": oauthClientID
+            "client_id": oauthClientID,
+            "scope": ClaudeOAuthFlow.scope
         ])
         return request
     }

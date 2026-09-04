@@ -109,7 +109,7 @@ final class AppState: ObservableObject {
     }
 
     func connectClaude() {
-        guard !isWorking else { return }
+        guard !isWorking, !isSilentRefreshRunning else { return }
         isWorking = true
         connectionState = .checking
 
@@ -133,6 +133,9 @@ final class AppState: ObservableObject {
     func refreshSilently() {
         guard !isWorking, !isSilentRefreshRunning else { return }
         isSilentRefreshRunning = true
+        if connectionState != .connected {
+            connectionState = .checking
+        }
 
         Task {
             defer { isSilentRefreshRunning = false }

@@ -29,10 +29,11 @@ Claude Session Warmer는 macOS 메뉴바에서 동작하며, 정해진 실행일
 ### FLOW-001 최초 실행 준비 (REQ-001, REQ-008, REQ-009, REQ-010, REQ-012, REQ-013)
 
 1. 사용자가 앱을 처음 실행하면 메뉴바 아이콘, 일정 설정과 별도의 `Claude 로그인` 동작을 본다.
-2. 일정 `저장`은 시각·요일·공휴일·로그인 실행 설정만 적용하고 OAuth나 Keychain 승인을 시작하지 않는다.
-3. 사용자가 `Claude 로그인`을 선택하면 앱은 기존 기본 Claude Code credential을 임시 보관하고 `claude auth login --claudeai`를 실행해 브라우저 로그인을 위임한다.
-4. 승인된 로그인 결과의 access token·회전형 refresh token·expiry를 앱 전용 Keychain에 `AfterFirstUnlockThisDeviceOnly`로 저장하고, 기존 기본 credential을 성공·실패와 관계없이 원상복구한다.
-5. 메뉴를 열면 앱 managed credential로 로그인 상태와 사용량을 자동 확인한다. 실제 응답을 발생시키는 PTY 검증은 배포 전 라이브 게이트에서 별도로 수행한다.
+2. 일정 `저장`은 시각·요일·공휴일·macOS 로그인 시 실행 설정만 적용하고 OAuth를 시작하지 않는다.
+3. 사용자가 `Claude 로그인`을 선택하면 앱은 `127.0.0.1` 임시 포트에서 callback을 기다리고 시스템 브라우저를 연다.
+4. callback의 state와 S256 PKCE를 검증한 뒤 authorization code를 토큰으로 직접 교환한다. 수동 code 붙여넣기 fallback은 제공하지 않는다.
+5. access token·회전형 refresh token·expiry는 앱 전용 Keychain에 `AfterFirstUnlockThisDeviceOnly`로 저장한다. Claude Code Keychain과 CLI 인증 subprocess는 사용하지 않는다.
+6. 메뉴를 열면 앱 managed credential로 로그인 상태와 사용량을 자동 확인한다. 실제 응답을 발생시키는 PTY 검증은 배포 전 라이브 게이트에서 별도로 수행한다.
 
 ### FLOW-002 예약 설정 및 변경 (REQ-002, REQ-003)
 
@@ -147,4 +148,4 @@ flowchart TD
 
 ## 8. 배포 전 검증 게이트
 
-라이브 anchor 검증은 배포 전 필수 게이트다(REQ-005, REQ-007, REQ-008, REQ-009, REQ-010). 실제 내부 배포 환경에서 CLI 로그인 위임, 기본 credential 원상복구, 앱 Keychain 저장·회전 refresh, PTY 대화형 최소 호출, 서버 `five_hour.resets_at`, 활성 창 생략, 중복 방지와 메뉴바 상태를 확인해야 한다. 화면 잠금·디스플레이 꺼짐과 지원하지 않는 잠자기·덮개·종료·로그아웃의 동작 차이도 각각 검증한다. 게이트 결과가 없으면 앱의 예약 흐름을 “검증 완료”로 표시하거나 배포 완료로 간주하지 않는다.
+라이브 anchor 검증은 배포 전 필수 게이트다(REQ-005, REQ-007, REQ-008, REQ-009, REQ-010). 실제 내부 배포 환경에서 시스템 브라우저 로그인, localhost callback·token exchange, 앱 Keychain 저장·회전 refresh, PTY 대화형 최소 호출, 서버 `five_hour.resets_at`, 활성 창 생략, 중복 방지와 메뉴바 상태를 확인해야 한다. callback 또는 token endpoint 정책 변경도 이 게이트에서 탐지한다. 화면 잠금·디스플레이 꺼짐과 지원하지 않는 잠자기·덮개·종료의 동작 차이도 각각 검증한다. 게이트 결과가 없으면 앱의 예약 흐름을 “검증 완료”로 표시하거나 배포 완료로 간주하지 않는다.
