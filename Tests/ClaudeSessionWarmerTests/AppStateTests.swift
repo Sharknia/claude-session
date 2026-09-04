@@ -50,45 +50,6 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testPauseTodayPersistsAndEndsCurrentChain() {
-        withStore { store in
-            store.saveDailyCycle(DailyCycle(
-                dayKey: "previous",
-                handledWindows: 1,
-                nextResetAt: Date().addingTimeInterval(3_600)
-            ))
-            let state = AppState(store: store, startScheduler: false)
-
-            state.pauseToday()
-
-            let saved = store.loadDailyCycle()
-            XCTAssertTrue(saved.pausedToday)
-            XCTAssertNil(saved.nextResetAt)
-            XCTAssertEqual(saved.lastRecord?.status, .skipped)
-        }
-    }
-
-    @MainActor
-    func testSkipNextPersistsWithoutRemovingFollowUp() {
-        withStore { store in
-            let nextReset = Date().addingTimeInterval(3_600)
-            store.saveDailyCycle(DailyCycle(
-                dayKey: ScheduleEngine().dayKey(for: Date()),
-                handledWindows: 1,
-                nextResetAt: nextReset
-            ))
-            let state = AppState(store: store, startScheduler: false)
-
-            state.skipNextWarmup()
-
-            let saved = store.loadDailyCycle()
-            XCTAssertTrue(saved.skipNext)
-            XCTAssertEqual(saved.nextResetAt, nextReset)
-            XCTAssertEqual(saved.lastRecord?.status, .skipped)
-        }
-    }
-
-    @MainActor
     func testFirstAndSecondFailuresKeepSchedulingTheDailyChain() {
         withStore { store in
             let firstTarget = Date(timeIntervalSince1970: 1_800_000_000)
@@ -117,35 +78,6 @@ final class AppStateTests: XCTestCase {
             XCTAssertEqual(
                 state.cycle.nextResetAt,
                 secondTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            )
-        }
-    }
-
-    @MainActor
-    func testConsumedSkipContinuesToFollowingWindow() {
-        withStore { store in
-            let target = Date(timeIntervalSince1970: 1_800_000_000)
-            store.saveDailyCycle(DailyCycle(
-                dayKey: "2026-09-04",
-                handledWindows: 1,
-                nextResetAt: target,
-                skipNext: true
-            ))
-            let state = AppState(store: store, startScheduler: false)
-
-            state.advanceAfterUnresolvedWindow(
-                targetAt: target,
-                windowNumber: 2,
-                status: .skipped,
-                message: "다음 워밍 1회 건너뜀",
-                consumingSkip: true
-            )
-
-            XCTAssertEqual(state.cycle.handledWindows, 2)
-            XCTAssertFalse(state.cycle.skipNext)
-            XCTAssertEqual(
-                state.cycle.nextResetAt,
-                target.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
             )
         }
     }
@@ -253,37 +185,6 @@ final class AppStateTests: XCTestCase {
 
             XCTAssertTrue(state.hasRecentWarmupAttempt(at: now))
             XCTAssertFalse(state.hasRecentWarmupAttempt(at: now.addingTimeInterval(61)))
-        }
-    }
-
-    @MainActor
-    func testRestartConsumesPendingFirstSkipOnlyAfterTarget() {
-        withStore { store in
-            let calendar = seoulCalendar()
-            let engine = ScheduleEngine(calendar: calendar)
-            let firstTarget = date(2026, 9, 4, 6, calendar: calendar)
-            let todayKey = engine.dayKey(for: firstTarget)
-            store.saveSettings(ScheduleSettings(
-                firstWarmupMinutes: 6 * 60,
-                weekdays: Set(1...7),
-                excludeKoreanHolidays: false
-            ))
-            store.saveDailyCycle(DailyCycle(dayKey: todayKey, skipNext: true))
-            let state = AppState(store: store, engine: engine, startScheduler: false)
-
-            state.reconcileMissedWindows(at: firstTarget.addingTimeInterval(-1))
-            XCTAssertEqual(state.cycle.handledWindows, 0)
-            XCTAssertTrue(state.cycle.skipNext)
-            XCTAssertNil(state.cycle.nextResetAt)
-
-            state.reconcileMissedWindows(at: firstTarget.addingTimeInterval(2 * 60))
-            XCTAssertEqual(state.cycle.handledWindows, 1)
-            XCTAssertFalse(state.cycle.skipNext)
-            XCTAssertEqual(state.cycle.lastRecord?.status, .skipped)
-            XCTAssertEqual(
-                state.cycle.nextResetAt,
-                firstTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            )
         }
     }
 

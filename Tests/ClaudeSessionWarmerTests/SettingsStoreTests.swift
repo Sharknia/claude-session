@@ -55,8 +55,6 @@ final class SettingsStoreTests: XCTestCase {
             dayKey: "2026-09-04",
             handledWindows: 2,
             nextResetAt: Date(timeIntervalSince1970: 1_800_018_000),
-            pausedToday: true,
-            skipNext: true,
             lastWarmupTargetAt: Date(timeIntervalSince1970: 1_800_000_000),
             lastRecord: record
         )
@@ -78,7 +76,7 @@ final class SettingsStoreTests: XCTestCase {
         )
         XCTAssertEqual(
             cycleKeys,
-            ["handledWindows", "pausedToday", "skipNext"]
+            ["handledWindows"]
         )
 
         let persistedKeys = scheduleKeys.union(cycleKeys)

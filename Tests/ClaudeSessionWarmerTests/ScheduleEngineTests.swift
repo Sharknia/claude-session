@@ -144,36 +144,6 @@ final class ScheduleEngineTests: XCTestCase {
         XCTAssertEqual(event?.windowNumber, 1)
     }
 
-    func testSkipNextStillSchedulesPendingNextEvent() {
-        let settings = ScheduleSettings(firstWarmupMinutes: 6 * 60)
-        let cycle = DailyCycle(
-            dayKey: "2026-09-04",
-            handledWindows: 1,
-            nextResetAt: date(2026, 9, 4, 11),
-            skipNext: true
-        )
-
-        let event = engine.nextEvent(
-            after: date(2026, 9, 4, 10),
-            settings: settings,
-            cycle: cycle
-        )
-
-        XCTAssertEqual(event?.targetAt, date(2026, 9, 4, 11))
-        XCTAssertEqual(event?.windowNumber, 2)
-    }
-
-    func testPauseTodayEndsRemainingDailyChain() {
-        let settings = ScheduleSettings(firstWarmupMinutes: 6 * 60)
-        let pausedBeforeFirst = engine.nextEvent(
-            after: date(2026, 9, 4, 5),
-            settings: settings,
-            cycle: DailyCycle(dayKey: "2026-09-04", pausedToday: true)
-        )
-
-        XCTAssertEqual(pausedBeforeFirst?.targetAt, date(2026, 9, 7, 6))
-    }
-
     func testElapsedResetIsNotCaughtUp() {
         let settings = ScheduleSettings(firstWarmupMinutes: 6 * 60)
         let cycle = DailyCycle(

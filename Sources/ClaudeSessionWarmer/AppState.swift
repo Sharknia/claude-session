@@ -137,21 +137,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    func pauseToday() {
-        ensureTodayCycle()
-        cycle.pausedToday = true
-        cycle.nextResetAt = nil
-        record(.skipped, message: "오늘 자동 워밍을 정지했습니다.")
-        saveCycleAndReschedule()
-    }
-
-    func skipNextWarmup() {
-        ensureTodayCycle()
-        cycle.skipNext = true
-        record(.skipped, message: "다음 워밍 1회 건너뜀")
-        saveCycleAndReschedule()
-    }
-
     func refresh() {
         guard !isWorking else { return }
         isWorking = true
@@ -183,8 +168,6 @@ final class AppState: ObservableObject {
         let belongsToActiveCycle = cycle.dayKey == engine.dayKey(for: now)
             && cycle.handledWindows > 0
             && cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
-            && !cycle.pausedToday
-            && !cycle.skipNext
             && expectedReset.map { now >= $0 } == true
 
         Task {
@@ -246,18 +229,6 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func saveCycleAndReschedule() {
-        store.saveDailyCycle(cycle)
-        scheduleNext()
-    }
-
-    private func ensureTodayCycle() {
-        let today = engine.dayKey(for: Date())
-        if cycle.dayKey != today {
-            cycle = DailyCycle(dayKey: today)
-        }
-    }
-
     private func scheduleNext(after now: Date = Date()) {
         timer?.invalidate()
         reconcileMissedWindows(at: now)
@@ -302,24 +273,7 @@ final class AppState: ObservableObject {
             store.saveDailyCycle(cycle)
         }
 
-        guard !cycle.pausedToday else {
-            scheduleNext()
-            return
-        }
-
         markScheduledWindowStarted(event)
-
-        if cycle.skipNext {
-            advanceAfterUnresolvedWindow(
-                targetAt: event.targetAt,
-                windowNumber: event.windowNumber,
-                status: .skipped,
-                message: "다음 워밍 1회 건너뜀",
-                consumingSkip: true
-            )
-            scheduleNext(after: Date().addingTimeInterval(0.1))
-            return
-        }
 
         isWorking = true
         status = .checking
@@ -450,18 +404,7 @@ final class AppState: ObservableObject {
     func reconcileMissedWindows(at now: Date) {
         let todayKey = engine.dayKey(for: now)
         if let firstTarget = engine.firstWarmup(on: now, settings: settings), firstTarget < now {
-            if cycle.dayKey == todayKey,
-               cycle.handledWindows == 0,
-               cycle.skipNext,
-               cycle.nextResetAt == nil {
-                advanceAfterUnresolvedWindow(
-                    targetAt: firstTarget,
-                    windowNumber: 1,
-                    status: .skipped,
-                    message: "다음 워밍 1회 건너뜀",
-                    consumingSkip: true
-                )
-            } else if cycle.dayKey != todayKey {
+            if cycle.dayKey != todayKey {
                 cycle = engine.newCycle(startingAt: firstTarget)
                 advanceAfterUnresolvedWindow(
                     targetAt: firstTarget,
@@ -489,8 +432,7 @@ final class AppState: ObservableObject {
         targetAt: Date,
         windowNumber: Int,
         status newStatus: WarmupStatus,
-        message: String,
-        consumingSkip: Bool = false
+        message: String
     ) {
         cycle.handledWindows = min(
             max(cycle.handledWindows, windowNumber),
@@ -499,9 +441,6 @@ final class AppState: ObservableObject {
         cycle.nextResetAt = cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
             ? targetAt.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
             : nil
-        if consumingSkip {
-            cycle.skipNext = false
-        }
         startedTargetsThisRun.remove(targetAt)
         record(newStatus, message: message)
         store.saveDailyCycle(cycle)

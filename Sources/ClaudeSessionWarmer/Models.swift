@@ -28,7 +28,6 @@ enum WarmupStatus: String, Codable, Equatable, Sendable {
     case warming
     case satisfied
     case succeeded
-    case skipped
     case missed
     case failed
 }
@@ -49,8 +48,6 @@ struct DailyCycle: Codable, Equatable, Sendable {
     var dayKey: String?
     var handledWindows: Int
     var nextResetAt: Date?
-    var pausedToday: Bool
-    var skipNext: Bool
     var lastWarmupTargetAt: Date?
     var lastRecord: WarmupRecord?
 
@@ -58,16 +55,12 @@ struct DailyCycle: Codable, Equatable, Sendable {
         dayKey: String? = nil,
         handledWindows: Int = 0,
         nextResetAt: Date? = nil,
-        pausedToday: Bool = false,
-        skipNext: Bool = false,
         lastWarmupTargetAt: Date? = nil,
         lastRecord: WarmupRecord? = nil
     ) {
         self.dayKey = dayKey
         self.handledWindows = min(max(handledWindows, 0), 3)
         self.nextResetAt = nextResetAt
-        self.pausedToday = pausedToday
-        self.skipNext = skipNext
         self.lastWarmupTargetAt = lastWarmupTargetAt
         self.lastRecord = lastRecord
     }

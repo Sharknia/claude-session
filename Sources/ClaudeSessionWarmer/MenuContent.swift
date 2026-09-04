@@ -36,7 +36,7 @@ struct MenuContent: View {
     }
 
     private var header: some View {
-        VStack(alignment: .leading, spacing: 8) {
+        VStack(alignment: .leading, spacing: 10) {
             HStack {
                 Text("Claude Session Warmer")
                     .font(.headline)
@@ -47,36 +47,54 @@ struct MenuContent: View {
                 }
             }
 
-            infoRow(label: "상태", value: state.statusMessage)
-
-            HStack(spacing: 10) {
-                Text("오늘 처리")
-                    .foregroundStyle(.secondary)
-                    .frame(width: 72, alignment: .leading)
-                ProgressView(
-                    value: Double(state.handledWindowsToday),
-                    total: Double(ScheduleEngine.maximumWindowsPerDay)
-                )
-                Text("\(state.handledWindowsToday)/3")
-                    .monospacedDigit()
-                    .frame(width: 28, alignment: .trailing)
+            HStack(spacing: 9) {
+                Image(systemName: statusIcon)
+                    .foregroundStyle(statusColor)
+                Text(state.statusMessage)
+                    .font(.subheadline)
+                    .lineLimit(2)
+                Spacer(minLength: 0)
             }
-            .font(.caption)
+            .padding(10)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
 
-            infoRow(label: "다음", value: state.nextEvent.map { "워밍 · \(formatted($0.date))" } ?? "없음")
-            infoRow(
-                label: "리셋",
-                value: (state.currentQuota?.resetsAt ?? state.cycle.nextResetAt).map(formatted) ?? "없음"
-            )
-            infoRow(
-                label: "사용량",
-                value: state.currentQuota?.usedPercent.map { String(format: "%.0f%%", $0) } ?? "확인 전"
-            )
+            HStack(spacing: 8) {
+                metricCard(
+                    value: "\(state.handledWindowsToday)/3",
+                    label: "오늘 처리",
+                    progress: Double(state.handledWindowsToday) / 3
+                )
+                metricCard(
+                    value: state.currentQuota?.usedPercent.map { String(format: "%.0f%%", $0) } ?? "—",
+                    label: "5시간 사용량",
+                    progress: state.currentQuota?.usedPercent.map { $0 / 100 }
+                )
+            }
+
+            HStack(spacing: 0) {
+                scheduleColumn(
+                    label: "다음 워밍",
+                    value: state.nextEvent.map { smartFormatted($0.date) } ?? "없음"
+                )
+                Divider()
+                    .padding(.vertical, 2)
+                scheduleColumn(
+                    label: "리셋",
+                    value: (state.currentQuota?.resetsAt ?? state.cycle.nextResetAt)
+                        .map(smartFormatted) ?? "없음"
+                )
+            }
+            .padding(.vertical, 10)
+            .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
         }
     }
 
     private var scheduleSettings: some View {
         VStack(alignment: .leading, spacing: 10) {
+            Text("일정 설정")
+                .font(.subheadline.weight(.semibold))
+
             HStack {
                 Text("첫 워밍")
                     .frame(width: 104, alignment: .leading)
@@ -156,40 +174,42 @@ struct MenuContent: View {
     }
 
     private var actions: some View {
-        VStack(spacing: 8) {
-            HStack(spacing: 8) {
-                actionButton("지금 워밍", prominent: true) { state.manualWarmup() }
-                actionButton("새로고침") { state.refresh() }
-            }
-            .disabled(state.isWorking)
-
-            HStack(spacing: 8) {
-                actionButton("오늘 정지", tint: .orange) { state.pauseToday() }
-                    .disabled(state.cycle.pausedToday)
-                actionButton("다음 건너뛰기", tint: .secondary) { state.skipNextWarmup() }
-                    .disabled(state.cycle.skipNext)
-            }
+        HStack(spacing: 8) {
+            actionButton("지금 워밍", prominent: true) { state.manualWarmup() }
+            actionButton("새로고침") { state.refresh() }
         }
+        .disabled(state.isWorking)
     }
 
     private var footer: some View {
-        HStack(alignment: .bottom, spacing: 12) {
+        VStack(alignment: .leading, spacing: 10) {
             if let record = state.cycle.lastRecord {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("최근 결과")
-                        .font(.caption2)
-                        .foregroundStyle(.secondary)
-                    Text("\(formatted(record.timestamp)) · \(record.message)")
-                        .font(.caption)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack {
+                        Label("최근 결과", systemImage: "clock.arrow.circlepath")
+                        Spacer()
+                        Text(smartFormatted(record.timestamp))
+                            .monospacedDigit()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                    Text(record.message)
+                        .font(.subheadline)
                         .lineLimit(2)
                 }
+                .padding(10)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(.secondary.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
             }
-            Spacer()
-            Button("종료") {
-                NSApplication.shared.terminate(nil)
+
+            HStack {
+                Spacer()
+                Button("종료") {
+                    NSApplication.shared.terminate(nil)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
             }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
         }
     }
 
@@ -222,17 +242,34 @@ struct MenuContent: View {
         }
     }
 
-    private func infoRow(label: String, value: String) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Text(label)
-                .foregroundStyle(.secondary)
-                .frame(width: 72, alignment: .leading)
+    private func metricCard(value: String, label: String, progress: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
             Text(value)
-                .frame(maxWidth: .infinity, alignment: .trailing)
-                .multilineTextAlignment(.trailing)
-                .lineLimit(2)
+                .font(.title3.weight(.semibold))
+                .monospacedDigit()
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            ProgressView(value: progress ?? 0)
+                .opacity(progress == nil ? 0.25 : 1)
         }
-        .font(.caption)
+        .padding(10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func scheduleColumn(label: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label)
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Text(value)
+                .font(.subheadline.weight(.medium))
+                .monospacedDigit()
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     private func settingToggle(_ title: String, isOn: Binding<Bool>) -> some View {
@@ -259,6 +296,7 @@ struct MenuContent: View {
             .buttonStyle(.borderedProminent)
             .tint(tint)
             .controlSize(.large)
+            .frame(maxWidth: .infinity)
         } else {
             Button(action: action) {
                 Text(title).frame(maxWidth: .infinity)
@@ -266,10 +304,36 @@ struct MenuContent: View {
             .buttonStyle(.bordered)
             .tint(tint)
             .controlSize(.large)
+            .frame(maxWidth: .infinity)
         }
     }
 
-    private func formatted(_ date: Date) -> String {
-        date.formatted(date: .abbreviated, time: .shortened)
+    private var statusIcon: String {
+        switch state.status {
+        case .idle: return "clock"
+        case .checking: return "arrow.triangle.2.circlepath"
+        case .warming: return "flame.fill"
+        case .satisfied, .succeeded: return "checkmark.circle.fill"
+        case .missed: return "forward.fill"
+        case .failed: return "exclamationmark.triangle.fill"
+        }
     }
+
+    private var statusColor: Color {
+        switch state.status {
+        case .satisfied, .succeeded: return .green
+        case .warming, .checking: return .accentColor
+        case .missed: return .orange
+        case .failed: return .red
+        case .idle: return .secondary
+        }
+    }
+
+    private func smartFormatted(_ date: Date) -> String {
+        if Calendar.autoupdatingCurrent.isDateInToday(date) {
+            return date.formatted(date: .omitted, time: .shortened)
+        }
+        return date.formatted(.dateTime.month(.defaultDigits).day().hour().minute())
+    }
+
 }

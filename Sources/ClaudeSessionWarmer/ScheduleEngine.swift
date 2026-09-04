@@ -102,7 +102,7 @@ struct ScheduleEngine: Sendable {
         cycle: DailyCycle
     ) -> ScheduledEvent? {
         let currentDayIsClosed = cycle.dayKey == dayKey(for: now)
-            && (cycle.pausedToday || cycle.handledWindows >= Self.maximumWindowsPerDay)
+            && cycle.handledWindows >= Self.maximumWindowsPerDay
         let freshFirst = currentDayIsClosed
             ? nextValidFirstWarmupAfterCurrentDay(now, settings: settings)
             : nextFirstWarmupOnOrAfter(now, settings: settings)
@@ -129,7 +129,6 @@ struct ScheduleEngine: Sendable {
             let originDayKey = cycle.dayKey,
             cycle.handledWindows > 0,
             cycle.handledWindows < Self.maximumWindowsPerDay,
-            !cycle.pausedToday,
             let resetAt = cycle.nextResetAt,
             dayKey(for: resetAt) == originDayKey,
             isHolidaySchedulingAllowed(resetAt, settings: settings),

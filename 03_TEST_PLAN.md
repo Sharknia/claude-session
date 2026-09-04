@@ -90,8 +90,8 @@
 ### TC-UI-001 — 상태·수동 제어·알림·로그인 실행 (P1, Integration+macOS)
 
 - 참조: `REQ-001`, `REQ-012`, `REQ-013`; `FLOW-011`, `FLOW-012`, `FLOW-013`
-- 실행: draft 변경 후 저장/미저장, 오늘 정지, 다음 한 건 건너뛰기, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
-- 기대: 오늘 정지는 오늘 남은 미시작 자동 창을 막는다. 다음 건너뛰기는 한 건만 `skipped`로 기록하고 `targetAt + 5시간` fallback으로 후속 창을 이어간다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다. 메뉴에 다음 실행·최근 결과·오류가 보이고 로그인 시 단일 인스턴스로 시작한다.
+- 실행: draft 변경 후 저장/미저장, 수동 워밍, 알림 허용/거부, 로그인 실행 on/off를 확인한다.
+- 기대: 저장 전 예약은 유지되고, 메뉴에 상태 card·오늘 처리/사용량 metric cards·다음/리셋 schedule card와 동일폭 주요 동작이 보인다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다.
 - 증거: 제어 전후 next-run/상태, 호출 ledger, 알림과 process list.
 
 ### TC-DIST-001 — 서명·공증 DMG smoke (P0, Deployment)
@@ -118,7 +118,7 @@
 | `REQ-001` macOS 메뉴바 | `FLOW-001`, `FLOW-011` | TC-UI-001, TC-DIST-001 |
 | `REQ-002` 시각·요일 | `FLOW-002`, `FLOW-003` | TC-CORE-001, TC-CORE-002 |
 | `REQ-003` 한국 공휴일 | `FLOW-002`, `FLOW-005` | TC-CORE-002 |
-| `REQ-004` 자동 최대 3창 | `FLOW-003`, `FLOW-004`, `FLOW-010`, `FLOW-012`, `FLOW-013` | TC-CORE-001, TC-UI-001, TC-LIVE-001 |
+| `REQ-004` 자동 최대 3창 | `FLOW-003`, `FLOW-004`, `FLOW-010`, `FLOW-013` | TC-CORE-001, TC-UI-001, TC-LIVE-001 |
 | `REQ-005` 실제 `resets_at` | `FLOW-003`, `FLOW-004`, `FLOW-006`, `FLOW-010`, `FLOW-011` | TC-CORE-001, TC-QUOTA-001, TC-LIVE-001 |
 | `REQ-006` T 정시 확인 | `FLOW-003`, `FLOW-004`, `FLOW-006` | TC-CORE-001, TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
 | `REQ-007` 제한 재시도·중복 방지 | `FLOW-003`, `FLOW-004`, `FLOW-006`, `FLOW-008`, `FLOW-010`, `FLOW-013` | TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
