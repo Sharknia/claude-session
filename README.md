@@ -45,23 +45,25 @@ swift test
 
 앱 내 실행 파일과 앱 번들에 hardened runtime·보안 타임스탬프를 적용한 뒤 DMG를 만들고 DMG도 서명합니다. Bundle ID `com.sharknia.ClaudeSessionWarmer`와 Team ID `V9SQZ6B7RP`를 유지합니다. `packaging/designated-requirement.txt`는 같은 팀의 Developer ID 인증서 갱신 후에도 호환되는 조건을 정의합니다. 다른 팀이나 개발용 인증서는 검증 단계에서 거부합니다.
 
-기본 결과물 `dist/ClaudeSessionWarmer-0.1.1-dev.dmg`는 **서명된 내부 검증용**입니다. 공증·stapling 전에는 공개 배포하지 않습니다. 이 Mac에서는 Developer ID 서명의 검증 도구로 기존 앱 Keychain을 비대화형으로 읽는 것까지 확인했습니다.
+기본 빌드는 공증·stapling까지 수행하고 `dist/ClaudeSessionWarmer-0.1.2.dmg`를 만듭니다. 공증 인증을 사용할 수 없으면 기존 산출물을 지우기 전에 실패합니다. 명시적인 `RELEASE_BUILD=0` 빌드만 공증되지 않은 `-dev.dmg`를 생성하며 공개 배포하지 않습니다. 이 Mac에서는 Developer ID 서명의 검증 도구로 기존 앱 Keychain을 비대화형으로 읽는 것까지 확인했습니다.
+
+DMG에는 앱과 `/Applications` 바로가기, Finder 아이콘 배치가 포함됩니다. 일반 빌드는 저장된 레이아웃을 사용하므로 Finder 자동화 권한이나 추가 Python 패키지가 필요하지 않습니다.
 
 ## 공개 배포 공증
 
-공증용 Keychain 프로필은 별도로 준비해야 합니다. Apple ID와 앱 전용 암호 또는 App Store Connect API 인증으로 `notarytool store-credentials`를 사용해 구성한 뒤 실행합니다. 인증 비밀은 저장소에 넣지 않습니다.
+이 Mac에는 `claude-session-notary` 공증용 Keychain 프로필이 등록돼 있습니다. 다른 빌드 머신에서는 별도로 준비해야 합니다. Apple ID와 앱 전용 암호 또는 App Store Connect API 인증으로 `notarytool store-credentials`를 사용해 구성한 뒤 실행합니다. 인증 비밀은 저장소에 넣지 않습니다.
 
 ```bash
 RELEASE_BUILD=1 NOTARY_PROFILE="claude-session-notary" ./scripts/build-dmg.sh
 ```
 
-프로필이 없으면 빌드 시작 전에 실패합니다. 앱 ZIP 공증의 `Accepted` 확인 → 앱 stapling·검증·Gatekeeper 평가 → DMG 생성·서명 → DMG 공증의 `Accepted` 확인 → DMG stapling·검증·Gatekeeper 평가를 모두 통과해야 공개 배포 결과물 `dist/ClaudeSessionWarmer-0.1.1.dmg`이 완료됩니다. 현재 실제 공증은 미실행 상태입니다.
+기본 프로필은 `claude-session-notary`이며, 사용할 수 없으면 빌드 시작 전에 실패합니다. 앱 ZIP 공증의 `Accepted` 확인 → 앱 stapling·검증·Gatekeeper 평가 → DMG 생성·서명 → DMG 공증의 `Accepted` 확인 → DMG stapling·검증·Gatekeeper 평가를 모두 통과해야 공개 배포 결과물 `dist/ClaudeSessionWarmer-0.1.2.dmg`이 완료됩니다. 0.1.2에서 앱·DMG 모두 `Accepted`, stapling 검증, `Notarized Developer ID` Gatekeeper 허용을 실측했습니다.
 
 Apple 공식 안내: [Developer ID 서명과 공증](https://developer.apple.com/developer-id/).
 
 ## 설치와 첫 실행
 
-1. DMG에서 `ClaudeSessionWarmer.app`을 Applications 폴더로 복사해 실행합니다.
+1. DMG를 열고 `ClaudeSessionWarmer.app` 아이콘을 옆의 `Applications` 폴더로 드래그합니다. 복사가 끝나면 Applications에 설치된 앱을 실행합니다.
 2. `Claude 로그인`을 눌러 Claude.ai 계정 승인을 완료합니다.
 3. 첫 워밍 시각, 요일, 공휴일 제외 및 macOS 로그인 시 실행 여부를 draft로 설정합니다.
 4. `저장`을 눌러 예약을 적용합니다. 저장은 Claude 로그인을 시작하지 않습니다.

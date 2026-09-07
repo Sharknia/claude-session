@@ -11,20 +11,23 @@ readonly APP_EXECUTABLE="$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 readonly INFO_PLIST_SOURCE="$PROJECT_DIR/packaging/Info.plist"
 readonly APP_ICON_SOURCE="$PROJECT_DIR/packaging/AppIcon.icns"
 readonly MENU_BAR_ICON_SOURCE="$PROJECT_DIR/packaging/MenuBarTemplate.pdf"
+readonly DMG_LAYOUT="$PROJECT_DIR/packaging/dmg/Finder.DS_Store"
+readonly DMG_STAGING="$DIST_DIR/.dmg-staging"
 readonly REQUIREMENTS_FILE="$PROJECT_DIR/packaging/designated-requirement.txt"
 readonly CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: HakKyeol Lee (V9SQZ6B7RP)}"
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$INFO_PLIST_SOURCE")"
 readonly APP_VERSION
-readonly RELEASE_BUILD="${RELEASE_BUILD:-0}"
+readonly RELEASE_BUILD="${RELEASE_BUILD:-1}"
+readonly NOTARY_PROFILE="${NOTARY_PROFILE:-claude-session-notary}"
 if [[ "$RELEASE_BUILD" == "1" ]]; then
-    : "${NOTARY_PROFILE:?RELEASE_BUILD=1에는 NOTARY_PROFILE이 필요합니다.}"
+    xcrun notarytool history --keychain-profile "$NOTARY_PROFILE" --output-format json > /dev/null
     readonly DMG_PATH="$DIST_DIR/$APP_NAME-$APP_VERSION.dmg"
 else
     readonly DMG_PATH="$DIST_DIR/$APP_NAME-$APP_VERSION-dev.dmg"
 fi
 readonly VOLUME_NAME="Claude Session Warmer $APP_VERSION"
 
-if [[ ! -f "$PROJECT_DIR/Package.swift" || ! -f "$INFO_PLIST_SOURCE" || ! -f "$APP_ICON_SOURCE" || ! -f "$MENU_BAR_ICON_SOURCE" || ! -f "$REQUIREMENTS_FILE" ]]; then
+if [[ ! -f "$PROJECT_DIR/Package.swift" || ! -f "$INFO_PLIST_SOURCE" || ! -f "$APP_ICON_SOURCE" || ! -f "$MENU_BAR_ICON_SOURCE" || ! -f "$REQUIREMENTS_FILE" || ! -f "$DMG_LAYOUT" ]]; then
     echo "오류: 프로젝트 루트 또는 필수 packaging 파일을 찾을 수 없습니다." >&2
     exit 1
 fi
@@ -77,13 +80,19 @@ if [[ "$RELEASE_BUILD" == "1" ]]; then
     rm -f -- "$APP_ARCHIVE"
 fi
 
-echo "[4/5] DMG 생성"
+echo "[4/5] Applications 드래그 설치용 DMG 생성"
+rm -rf -- "$DMG_STAGING"
+mkdir -p "$DMG_STAGING"
+ditto "$APP_BUNDLE" "$DMG_STAGING/$APP_NAME.app"
+ln -s /Applications "$DMG_STAGING/Applications"
+cp "$DMG_LAYOUT" "$DMG_STAGING/.DS_Store"
 hdiutil create \
     -volname "$VOLUME_NAME" \
-    -srcfolder "$APP_BUNDLE" \
+    -srcfolder "$DMG_STAGING" \
     -format UDZO \
     -ov \
     "$DMG_PATH"
+rm -rf -- "$DMG_STAGING"
 
 codesign --force --timestamp --identifier com.sharknia.ClaudeSessionWarmer.dmg --sign "$CODESIGN_IDENTITY" "$DMG_PATH"
 codesign --verify --strict --verbose=2 "$DMG_PATH"
