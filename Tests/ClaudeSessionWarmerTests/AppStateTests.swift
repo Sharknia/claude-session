@@ -243,6 +243,98 @@ final class AppStateTests: XCTestCase {
         }
     }
 
+    @MainActor
+    func testAuthenticationFailureAdvancesOnceAndNeverReopensFirstWindow() {
+        withStore { store in
+            let calendar = seoulCalendar()
+            let engine = ScheduleEngine(calendar: calendar)
+            let target = date(2026, 9, 7, 6, calendar: calendar)
+            let settings = ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false)
+            store.saveSettings(settings)
+            store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target)))
+            let state = AppState(store: store, engine: engine, startScheduler: false)
+            let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
+            state.markScheduledWindowStarted(event)
+            state.handleTargetFailure(ClaudeServiceError.oauthRefreshFailed, event: event, at: target)
+            let terminal = state.cycle
+            XCTAssertEqual(terminal.handledWindows, 1)
+            XCTAssertEqual(terminal.lastRecord?.status, .failed)
+            XCTAssertEqual(state.nextEvent?.windowNumber, 2)
+            XCTAssertEqual(state.nextEvent?.targetAt, target.addingTimeInterval(5 * 3600))
+
+            // 실제 장애의 258회 재선택·missed 덮어쓰기를 재현하는 입력이다.
+            for index in 0..<258 {
+                state.advanceAfterUnresolvedWindow(targetAt: target, windowNumber: 1, status: .missed, message: "overwrite")
+                state.handleTargetFailure(ClaudeServiceError.quotaUnavailable, event: event, at: target.addingTimeInterval(150))
+                let next = engine.nextEvent(after: target.addingTimeInterval(Double(index) / 10), settings: settings, cycle: state.cycle)
+                XCTAssertEqual(next?.windowNumber, 2)
+            }
+            XCTAssertEqual(state.cycle, terminal)
+            XCTAssertEqual(store.loadDailyCycle(), terminal)
+        }
+    }
+
+    @MainActor
+    func testTransientRetriesPreserveFirstFailureThroughRestartAndGraceExpiry() {
+        withStore { store in
+            let calendar = seoulCalendar()
+            let engine = ScheduleEngine(calendar: calendar)
+            let target = date(2026, 9, 7, 6, calendar: calendar)
+            store.saveSettings(ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false))
+            store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target)))
+            let state = AppState(store: store, engine: engine, startScheduler: false)
+            let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
+            state.markScheduledWindowStarted(event)
+            state.handleTargetFailure(ClaudeServiceError.oauthRefreshUnavailable, event: event, at: target)
+            let original = state.cycle.firstFailure
+            XCTAssertEqual(state.cycle.handledWindows, 0)
+            XCTAssertEqual(state.nextEvent?.date, target.addingTimeInterval(30))
+            state.markScheduledWindowStarted(event)
+            state.handleTargetFailure(ClaudeServiceError.quotaRateLimited, event: event, at: target.addingTimeInterval(30))
+            XCTAssertEqual(state.cycle.firstFailure, original)
+            XCTAssertEqual(state.cycle.lastRecord?.message, original?.message)
+
+            let restarted = AppState(store: store, engine: engine, startScheduler: false)
+            restarted.reconcileMissedWindows(at: target.addingTimeInterval(181))
+            XCTAssertEqual(restarted.cycle.handledWindows, 1)
+            XCTAssertEqual(restarted.cycle.lastRecord?.status, .failed)
+            XCTAssertEqual(restarted.cycle.lastRecord?.message, original?.message)
+            let terminal = restarted.cycle
+            restarted.reconcileMissedWindows(at: target.addingTimeInterval(182))
+            XCTAssertEqual(restarted.cycle, terminal)
+            XCTAssertEqual(terminal.nextResetAt, target.addingTimeInterval(5 * 3600))
+        }
+    }
+
+    @MainActor
+    func testTransientFailureAtRetryDeadlineClosesAsFailed() {
+        withStore { store in
+            let calendar = seoulCalendar()
+            let engine = ScheduleEngine(calendar: calendar)
+            let target = date(2026, 9, 7, 6, calendar: calendar)
+            store.saveSettings(ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false))
+            store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target)))
+            let state = AppState(store: store, engine: engine, startScheduler: false)
+            let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
+            state.markScheduledWindowStarted(event)
+            state.handleTargetFailure(ClaudeServiceError.quotaUnavailable, event: event, at: target.addingTimeInterval(151))
+            XCTAssertEqual(state.cycle.handledWindows, 1)
+            XCTAssertEqual(state.cycle.lastRecord?.status, .failed)
+            XCTAssertEqual(state.nextEvent?.windowNumber, 2)
+        }
+    }
+
+    @MainActor
+    func testRetryPolicySeparatesAuthenticationFromTransientFailures() {
+        for error in [ClaudeServiceError.oauthRefreshFailed, .quotaUnauthorized, .managedCredentialsUnavailable, .credentialsUnavailable, .cliNotFound] {
+            XCTAssertFalse(AppState.shouldRetryScheduledFailure(error))
+        }
+        for error in [ClaudeServiceError.oauthRefreshUnavailable, .quotaUnavailable, .quotaRateLimited] {
+            XCTAssertTrue(AppState.shouldRetryScheduledFailure(error))
+        }
+        XCTAssertTrue(AppState.shouldRetryScheduledFailure(URLError(.timedOut)))
+    }
+
     private func withStore(_ body: (SettingsStore) -> Void) {
         let suiteName = "AppStateTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!

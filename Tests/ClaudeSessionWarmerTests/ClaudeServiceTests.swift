@@ -94,7 +94,7 @@ final class ClaudeServiceTests: XCTestCase {
     }
 
     func testRefreshRequestAndMergePreserveRotatedCredentialFields() throws {
-        let request = ClaudeService.makeRefreshRequest(refreshToken: "refresh-value")
+        let request = ClaudeService.makeRefreshRequest(refreshToken: "refresh-value", scopes: ["user:inference"])
         XCTAssertEqual(request.httpMethod, "POST")
         XCTAssertEqual(request.timeoutInterval, 30)
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
@@ -102,7 +102,7 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertEqual(body["client_id"], ClaudeOAuthFlow.clientID)
         XCTAssertEqual(body["grant_type"], "refresh_token")
         XCTAssertEqual(body["refresh_token"], "refresh-value")
-        XCTAssertEqual(body["scope"], ClaudeOAuthFlow.scope)
+        XCTAssertEqual(body["scope"], "user:inference")
 
         let current = ManagedClaudeCredential(accessToken: "old", refreshToken: "old-refresh", expiresAtMilliseconds: nil, scopes: ["old"])
         let response = Data("{\"access_token\":\"new\",\"refresh_token\":\"rotated\",\"expires_in\":3600,\"scope\":\"user:inference user:profile\"}".utf8)
@@ -111,6 +111,36 @@ final class ClaudeServiceTests: XCTestCase {
         XCTAssertEqual(merged.refreshToken, "rotated")
         XCTAssertEqual(merged.expiresAtMilliseconds, 4_600_000)
         XCTAssertEqual(merged.scopes, ["user:inference", "user:profile"])
+    }
+
+    func testRefreshOmitsScopeWhenGrantedScopesAreUnknown() throws {
+        let request = ClaudeService.makeRefreshRequest(refreshToken: "fixture", scopes: [])
+        let body = try XCTUnwrap(JSONSerialization.jsonObject(with: XCTUnwrap(request.httpBody)) as? [String: String])
+        XCTAssertNil(body["scope"])
+    }
+
+    func testOAuthErrorDiagnosticsOnlyExposeAllowedCodes() {
+        XCTAssertEqual(ClaudeService.safeOAuthErrorCode(Data(#"{"error":"invalid_scope","error_description":"sensitive fixture"}"#.utf8)), "invalid_scope")
+        XCTAssertEqual(ClaudeService.safeOAuthErrorCode(Data(#"{"error":{"type":"invalid_grant"}}"#.utf8)), "invalid_grant")
+        XCTAssertEqual(ClaudeService.safeOAuthErrorCode(Data(#"{"error":"sensitive fixture"}"#.utf8)), "unknown")
+        XCTAssertEqual(ClaudeService.safeOAuthErrorCode(Data("invalid JSON".utf8)), "unknown")
+    }
+
+    func testOlderCycleWithoutFailureFieldStillDecodes() throws {
+        let data = Data(#"{"dayKey":"2026-09-07","handledWindows":1}"#.utf8)
+        let cycle = try JSONDecoder().decode(DailyCycle.self, from: data)
+        XCTAssertEqual(cycle.handledWindows, 1)
+        XCTAssertNil(cycle.firstFailure)
+    }
+
+    func testRefreshFailuresSeparateRejectedCredentialsFromTransientServiceErrors() {
+        for code in [400, 401, 403] {
+            XCTAssertEqual(ClaudeService.refreshError(for: code), .oauthRefreshFailed)
+        }
+        for code in [429, 500, 502, 503] {
+            XCTAssertEqual(ClaudeService.refreshError(for: code), .oauthRefreshUnavailable)
+        }
+        XCTAssertEqual(ClaudeService.refreshError(for: nil), .oauthRefreshUnavailable)
     }
 
     func testQuotaHTTPStatusErrorsAreDistinguished() {
@@ -180,7 +210,7 @@ final class ClaudeServiceTests: XCTestCase {
             executableURL: URL(fileURLWithPath: "/tmp/fake-claude"),
             inheritedEnvironment: ["ANTHROPIC_API_KEY": "secret", "ANTHROPIC_AUTH_TOKEN": "secret", "CLAUDE_CODE_OAUTH_TOKEN": "secret", "CLAUDE_CODE_USE_FOUNDRY": "1", "PATH": "/usr/bin"]
         )
-        XCTAssertEqual(command.arguments, ["--safe-mode", "--tools", "", "--model", "haiku", "--effort", "low"])
+        XCTAssertEqual(command.arguments, ["--safe-mode", "--tools", "", "--model", "haiku", "--effort", "low", "--ax-screen-reader"])
         XCTAssertNil(command.environment["ANTHROPIC_API_KEY"])
         XCTAssertNil(command.environment["ANTHROPIC_AUTH_TOKEN"])
         XCTAssertNil(command.environment["CLAUDE_CODE_OAUTH_TOKEN"])
@@ -202,8 +232,8 @@ final class ClaudeServiceTests: XCTestCase {
     func testPTYWarmupRecognizesMarkerFromFakeExecutable() throws {
         let executable = try makeExecutable("""
         #!/bin/sh
-        IFS= read -r _
-        printf 'CW_WARMUP_OK\\n'
+        [ "$1" = "--" ] && [ "$2" = "hello" ] || exit 2
+        printf 'claude: CW_WARMUP_OK\\n'
         IFS= read -r _
         """)
         let command = ClaudeWarmupCommand(
@@ -214,6 +244,28 @@ final class ClaudeServiceTests: XCTestCase {
         )
 
         XCTAssertNoThrow(try ClaudeService().performWarmup(command: command, timeout: 2))
+    }
+
+    func testWarmupOutputRejectsEchoAndTerminalTitle() {
+        XCTAssertFalse(ClaudeWarmupOutput.receivedSuccess(in: Data("you: CW_WARMUP_OK\r\n".utf8)))
+        XCTAssertFalse(ClaudeWarmupOutput.receivedSuccess(in: Data("error: CW_WARMUP_OK\r\n".utf8)))
+        XCTAssertFalse(ClaudeWarmupOutput.receivedSuccess(in: Data("\u{1B}]0;\nclaude: CW_WARMUP_OK\u{7}".utf8)))
+        XCTAssertFalse(ClaudeWarmupOutput.receivedSuccess(in: Data("claude: CW_WARMUP_OK_EXTRA".utf8)))
+    }
+
+    func testWarmupOutputRecognizesDecoratedAndIncompleteUTF8Response() {
+        var data = Data("claude: \u{1B}[32mCW_WARMUP_OK\u{1B}[0m\r\n".utf8)
+        data.append(0xE2) // 다음 UTF-8 문자의 일부가 뒤에 와도 완료된 답변을 놓치지 않는다.
+        XCTAssertTrue(ClaudeWarmupOutput.receivedSuccess(in: data))
+        XCTAssertFalse(ClaudeWarmupOutput.receivedSuccess(in: Data("claude: CW_WARM".utf8)))
+    }
+
+    func testPTYWarmupDoesNotAcceptEchoedMarker() throws {
+        let executable = try makeExecutable("#!/bin/sh\nprintf 'you: CW_WARMUP_OK\\n'\n")
+        let command = ClaudeWarmupCommand(executableURL: executable, arguments: [], environment: [:], prompt: "hello")
+        XCTAssertThrowsError(try ClaudeService().performWarmup(command: command, timeout: 2)) {
+            XCTAssertEqual($0 as? ClaudeServiceError, .warmupFailed)
+        }
     }
 
     func testPTYWarmupTimeoutKillsUnresponsiveProcess() throws {

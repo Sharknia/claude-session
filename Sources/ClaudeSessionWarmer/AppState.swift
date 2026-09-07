@@ -26,6 +26,10 @@ final class AppState: ObservableObject {
 
     private let store: SettingsStore
     private let engine: ScheduleEngine
+    private let schedulerEnabled: Bool
+    private let clock: @Sendable () -> Date
+    private let inspectScheduled: @Sendable (String) async throws -> Inspection
+    private let warmScheduled: @Sendable (URL, String) async throws -> Void
     private let lifecycleMonitor = LifecycleMonitor()
     private var timer: Timer?
     private var startedTargetsThisRun: Set<Date> = []
@@ -35,11 +39,18 @@ final class AppState: ObservableObject {
     init(
         store: SettingsStore = SettingsStore(),
         engine: ScheduleEngine = ScheduleEngine(),
-        startScheduler: Bool = true
+        startScheduler: Bool = true,
+        clock: @escaping @Sendable () -> Date = { Date() },
+        inspectScheduled: (@Sendable (String) async throws -> Inspection)? = nil,
+        warmScheduled: (@Sendable (URL, String) async throws -> Void)? = nil
     ) {
         let savedCycle = store.loadDailyCycle()
         self.store = store
         self.engine = engine
+        self.schedulerEnabled = startScheduler
+        self.clock = clock
+        self.inspectScheduled = inspectScheduled ?? { try await Self.inspectManagedClaude(operationID: $0) }
+        self.warmScheduled = warmScheduled ?? { try await Self.runManagedWarmup(cliURL: $0, operationID: $1) }
         settings = store.loadSettings()
         cycle = savedCycle
         status = savedCycle.lastRecord?.status ?? .idle
@@ -53,6 +64,7 @@ final class AppState: ObservableObject {
         diagnosticLogCritical("app.started", [
             "pid": "\(ProcessInfo.processInfo.processIdentifier)",
             "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
+            "app_build": Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development",
             "start_scheduler": startScheduler ? "true" : "false",
             "day_key": savedCycle.dayKey ?? "none",
             "handled_windows": "\(savedCycle.handledWindows)",
@@ -151,7 +163,7 @@ final class AppState: ObservableObject {
 
     func refreshSilently() {
         guard !isWorking, !isSilentRefreshRunning else { return }
-        let now = Date()
+        let now = clock()
         if let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: now) {
             currentQuota = cache.quota
             connectionState = .connected
@@ -193,7 +205,7 @@ final class AppState: ObservableObject {
         guard !isWorking else { return }
         isWorking = true
         isManualWarmupRunning = true
-        let now = Date()
+        let now = clock()
         let expectedReset = cycle.nextResetAt
         let belongsToActiveCycle = cycle.dayKey == engine.dayKey(for: now)
             && cycle.handledWindows > 0
@@ -214,10 +226,7 @@ final class AppState: ObservableObject {
                     store.saveDailyCycle(cycle)
                     attemptedTarget = target
                     let warmupOperationID = UUID().uuidString
-                    try await Self.runManagedWarmup(
-                        cliURL: inspection.cliURL,
-                        operationID: warmupOperationID
-                    )
+                    try await warmScheduled(inspection.cliURL, warmupOperationID)
                     performedWarmup = true
                     inspection = try await Self.inspectManagedClaude()
                 }
@@ -263,7 +272,8 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func scheduleNext(after now: Date = Date()) {
+    private func scheduleNext(after date: Date? = nil) {
+        let now = date ?? clock()
         timer?.invalidate()
         reconcileMissedWindows(at: now)
         nextEvent = engine.nextEvent(after: now, settings: settings, cycle: cycle)
@@ -285,6 +295,7 @@ final class AppState: ObservableObject {
     }
 
     private func arm(_ event: ScheduledEvent, at date: Date) {
+        guard schedulerEnabled else { return }
         timer?.invalidate()
         let delay = max(0.05, date.timeIntervalSinceNow)
         var metadata = scheduledMetadata(event)
@@ -304,12 +315,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func handle(_ event: ScheduledEvent) {
+    func handle(_ event: ScheduledEvent) {
+        guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
         guard !isWorking else {
             arm(event, at: Date().addingTimeInterval(5))
             return
         }
-        let now = Date()
+        let now = clock()
         if engine.position(of: event.targetAt, at: now) == .missed {
             closeMissed(event)
             return
@@ -339,7 +351,7 @@ final class AppState: ObservableObject {
         Task {
             var quotaOperationID = UUID().uuidString
             do {
-                var inspection = try await Self.inspectManagedClaude(operationID: quotaOperationID)
+                var inspection = try await inspectScheduled(quotaOperationID)
                 connectionState = .connected
                 logQuotaDecision(
                     inspection.quota,
@@ -351,7 +363,7 @@ final class AppState: ObservableObject {
                     complete(event, quota: inspection.quota, status: .satisfied, message: "이미 열린 창을 확인했습니다.")
                 } else if inspection.quota.active {
                     throw AppStateError.quotaNotReset
-                } else if shouldSuppressWarmup(for: event.targetAt, at: Date()) {
+                } else if shouldSuppressWarmup(for: event.targetAt, at: clock()) {
                     throw AppStateError.quotaNotActivated
                 } else {
                     cycle.lastWarmupTargetAt = event.targetAt
@@ -363,12 +375,9 @@ final class AppState: ObservableObject {
                     warmupMetadata["context"] = "scheduled"
                     warmupMetadata["operation_id"] = warmupOperationID
                     diagnosticLog("warmup.requested", warmupMetadata)
-                    try await Self.runManagedWarmup(
-                        cliURL: inspection.cliURL,
-                        operationID: warmupOperationID
-                    )
+                    try await warmScheduled(inspection.cliURL, warmupOperationID)
                     quotaOperationID = UUID().uuidString
-                    inspection = try await Self.inspectManagedClaude(operationID: quotaOperationID)
+                    inspection = try await inspectScheduled(quotaOperationID)
                     logQuotaDecision(
                         inspection.quota,
                         phase: "scheduled_post",
@@ -398,6 +407,7 @@ final class AppState: ObservableObject {
     }
 
     func markScheduledWindowStarted(_ event: ScheduledEvent) {
+        if cycle.firstFailure?.targetAt != event.targetAt { cycle.firstFailure = nil }
         startedTargetsThisRun.insert(event.targetAt)
         cycle.nextResetAt = event.targetAt
         record(.checking, message: "\(event.windowNumber)번째 창 확인 시작")
@@ -432,6 +442,7 @@ final class AppState: ObservableObject {
         message: String
     ) {
         cacheQuota(quota)
+        cycle.firstFailure = nil
         cycle.handledWindows = min(
             max(cycle.handledWindows, event.windowNumber),
             ScheduleEngine.maximumWindowsPerDay
@@ -448,16 +459,38 @@ final class AppState: ObservableObject {
         metadata["next_target_at"] = diagnosticDate(cycle.nextResetAt)
         diagnosticLogCritical("window.completed", metadata)
         startedTargetsThisRun.remove(event.targetAt)
-        scheduleNext(after: Date().addingTimeInterval(0.1))
+        scheduleNext(after: clock().addingTimeInterval(0.1))
     }
 
-    private func handleTargetFailure(_ error: Error, event: ScheduledEvent) {
+    static func shouldRetryScheduledFailure(_ error: Error) -> Bool {
+        if let serviceError = error as? ClaudeServiceError {
+            switch serviceError {
+            case .oauthRefreshUnavailable, .quotaRateLimited, .quotaUnavailable:
+                return true
+            case .warmupTimedOut, .warmupFailed:
+                // 이미 전송됐을 수 있다. 기존 중복 방지에 따라 후속 시도는 사용량만 확인한다.
+                return true
+            default: return false
+            }
+        }
+        return error is AppStateError || error is URLError
+    }
+
+    func handleTargetFailure(_ error: Error, event: ScheduledEvent, at date: Date? = nil) {
+        let now = date ?? clock()
+        guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
+        if cycle.firstFailure?.targetAt != event.targetAt {
+            cycle.firstFailure = ScheduledWindowFailure(
+                targetAt: event.targetAt, message: "워밍 확인 실패: \(error.localizedDescription)"
+            )
+        }
+        let failureMessage = cycle.firstFailure!.message
         let expiresAt = engine.timing(for: event.targetAt).expiresAt
-        let retryAt = Date().addingTimeInterval(30)
-        record(.failed, message: "워밍 확인 실패: \(error.localizedDescription)")
+        let retryAt = now.addingTimeInterval(30)
+        record(.failed, message: failureMessage)
         store.saveDailyCycle(cycle)
 
-        if retryAt <= expiresAt {
+        if Self.shouldRetryScheduledFailure(error), retryAt <= expiresAt {
             var metadata = scheduledMetadata(event)
             metadata["retry_at"] = diagnosticDate(retryAt)
             metadata["deadline_at"] = diagnosticDate(expiresAt)
@@ -478,10 +511,10 @@ final class AppState: ObservableObject {
             targetAt: event.targetAt,
             windowNumber: event.windowNumber,
             status: .failed,
-            message: "워밍 확인 실패: \(error.localizedDescription)"
+            message: failureMessage
         )
-        notifyFailure(statusMessage)
-        scheduleNext(after: Date().addingTimeInterval(0.1))
+        if schedulerEnabled { notifyFailure(statusMessage) }
+        scheduleNext(after: now.addingTimeInterval(0.1))
     }
 
     private func closeMissed(_ event: ScheduledEvent) {
@@ -494,7 +527,7 @@ final class AppState: ObservableObject {
             status: .missed,
             message: "예약 시각을 놓쳐 해당 창은 따라잡지 않습니다."
         )
-        scheduleNext(after: Date().addingTimeInterval(0.1))
+        scheduleNext(after: clock().addingTimeInterval(0.1))
     }
 
     func reconcileMissedWindows(at now: Date) {
@@ -530,6 +563,10 @@ final class AppState: ObservableObject {
         status newStatus: WarmupStatus,
         message: String
     ) {
+        guard windowNumber > cycle.handledWindows else { return }
+        let originalFailure = cycle.firstFailure.flatMap { $0.targetAt == targetAt ? $0 : nil }
+        let finalStatus: WarmupStatus = originalFailure == nil ? newStatus : .failed
+        let finalMessage = originalFailure?.message ?? message
         cycle.handledWindows = min(
             max(cycle.handledWindows, windowNumber),
             ScheduleEngine.maximumWindowsPerDay
@@ -538,12 +575,12 @@ final class AppState: ObservableObject {
             ? targetAt.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
             : nil
         startedTargetsThisRun.remove(targetAt)
-        record(newStatus, message: message)
+        record(finalStatus, message: finalMessage)
         store.saveDailyCycle(cycle)
         diagnosticLogCritical("window.unresolved", [
             "target_at": diagnosticDate(targetAt),
             "window": "\(windowNumber)",
-            "outcome": String(describing: newStatus),
+            "outcome": String(describing: finalStatus),
             "fallback_at": diagnosticDate(cycle.nextResetAt),
             "handled_windows": "\(cycle.handledWindows)"
         ])
@@ -610,7 +647,7 @@ final class AppState: ObservableObject {
     private func record(_ newStatus: WarmupStatus, message: String) {
         status = newStatus
         statusMessage = message
-        cycle.lastRecord = WarmupRecord(timestamp: Date(), status: newStatus, message: message)
+        cycle.lastRecord = WarmupRecord(timestamp: clock(), status: newStatus, message: message)
     }
 
     private func notifyFailure(_ message: String) {
@@ -633,7 +670,8 @@ final class AppState: ObservableObject {
         }
         if serviceError == .managedCredentialsUnavailable {
             connectionState = .disconnected
-        } else if serviceError == .quotaRateLimited
+        } else if serviceError == .oauthRefreshUnavailable
+                    || serviceError == .quotaRateLimited
                     || serviceError == .quotaUnavailable
                     || serviceError == .invalidUsageResponse {
             if connectionState == .checking {
@@ -685,7 +723,7 @@ final class AppState: ObservableObject {
     }
 }
 
-private struct Inspection: Sendable {
+struct Inspection: Sendable {
     let cliURL: URL
     let quota: QuotaWindow
     let operationID: String
