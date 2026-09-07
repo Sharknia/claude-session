@@ -1,6 +1,6 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.2-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.3-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -12,6 +12,7 @@
 - 첫 워밍 시각과 실행 요일 설정
 - 대한민국 공휴일 제외 옵션
 - 사용량 창이 이미 열려 있으면 추가 호출 생략
+- 수동·자동 워밍 후 간격을 두고 세션 활성화 확인
 - 실제 리셋 시각을 기준으로 하루 최대 3개 창 관리
 - 현재 사용량, 실행 결과, 다음 예약 확인
 - 수동 워밍 및 macOS 로그인 시 자동 실행

@@ -28,8 +28,9 @@ final class AppState: ObservableObject {
     private let engine: ScheduleEngine
     private let schedulerEnabled: Bool
     private let clock: @Sendable () -> Date
-    private let inspectScheduled: @Sendable (String) async throws -> Inspection
-    private let warmScheduled: @Sendable (URL, String) async throws -> Void
+    private let confirmationSleep: @Sendable (Duration) async throws -> Void
+    private let inspectClaude: @Sendable (String) async throws -> Inspection
+    private let warmClaude: @Sendable (URL, String) async throws -> Void
     private let lifecycleMonitor = LifecycleMonitor()
     private var timer: Timer?
     private var startedTargetsThisRun: Set<Date> = []
@@ -41,20 +42,22 @@ final class AppState: ObservableObject {
         engine: ScheduleEngine = ScheduleEngine(),
         startScheduler: Bool = true,
         clock: @escaping @Sendable () -> Date = { Date() },
-        inspectScheduled: (@Sendable (String) async throws -> Inspection)? = nil,
-        warmScheduled: (@Sendable (URL, String) async throws -> Void)? = nil
+        inspectClaude: (@Sendable (String) async throws -> Inspection)? = nil,
+        warmClaude: (@Sendable (URL, String) async throws -> Void)? = nil,
+        confirmationSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         let savedCycle = store.loadDailyCycle()
         self.store = store
         self.engine = engine
         self.schedulerEnabled = startScheduler
         self.clock = clock
-        self.inspectScheduled = inspectScheduled ?? { try await Self.inspectManagedClaude(operationID: $0) }
-        self.warmScheduled = warmScheduled ?? { try await Self.runManagedWarmup(cliURL: $0, operationID: $1) }
+        self.confirmationSleep = confirmationSleep
+        self.inspectClaude = inspectClaude ?? { try await Self.inspectManagedClaude(operationID: $0) }
+        self.warmClaude = warmClaude ?? { try await Self.runManagedWarmup(cliURL: $0, operationID: $1) }
         settings = store.loadSettings()
         cycle = savedCycle
         status = savedCycle.lastRecord?.status ?? .idle
-        statusMessage = savedCycle.lastRecord?.message ?? "대기 중"
+        statusMessage = savedCycle.lastRecord?.displayMessage ?? "대기 중"
         if let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: Date()) {
             currentQuota = cache.quota
             connectionState = .connected
@@ -212,50 +215,32 @@ final class AppState: ObservableObject {
             && cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
             && expectedReset.map { now >= $0 } == true
 
+        status = .checking
+        statusMessage = "세션 상태를 확인하고 있습니다."
         Task {
-            var attemptedTarget: Date?
             do {
-                var inspection = try await Self.inspectManagedClaude()
-                var performedWarmup = false
-                if !inspection.quota.active {
-                    guard !hasRecentWarmupAttempt(at: now) else {
-                        throw AppStateError.recentWarmupUnconfirmed
-                    }
-                    let target = belongsToActiveCycle ? expectedReset! : now
-                    cycle.lastWarmupTargetAt = target
-                    store.saveDailyCycle(cycle)
-                    attemptedTarget = target
-                    let warmupOperationID = UUID().uuidString
-                    try await warmScheduled(inspection.cliURL, warmupOperationID)
-                    performedWarmup = true
-                    inspection = try await Self.inspectManagedClaude()
-                }
-                guard inspection.quota.active, inspection.quota.resetsAt != nil else {
-                    throw AppStateError.quotaNotActivated
-                }
-
-                cacheQuota(inspection.quota)
+                let event = belongsToActiveCycle ? ScheduledEvent(
+                    date: now, targetAt: expectedReset!, dayKey: engine.dayKey(for: now),
+                    windowNumber: cycle.handledWindows + 1
+                ) : nil
+                let result = try await checkSession(
+                    targetAt: event?.targetAt ?? now, event: event, context: "manual",
+                    operationID: UUID().uuidString
+                )
+                cacheQuota(result.inspection.quota)
                 connectionState = .connected
                 if belongsToActiveCycle {
                     cycle.handledWindows = min(cycle.handledWindows + 1, ScheduleEngine.maximumWindowsPerDay)
                     cycle.nextResetAt = cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
-                        ? inspection.quota.resetsAt
-                        : nil
-                    store.saveDailyCycle(cycle)
+                        ? result.inspection.quota.resetsAt : nil
+                    cycle.firstFailure = nil
                 }
-                record(
-                    performedWarmup ? .succeeded : .satisfied,
-                    message: "수동 워밍을 확인했습니다."
-                )
-                store.saveDailyCycle(cycle)
+                // 놓친 예약 정리 뒤 수동 동작의 최종 결과를 표시한다.
                 scheduleNext()
+                record(result.status, message: result.message)
+                store.saveDailyCycle(cycle)
             } catch {
                 updateConnectionFailure(error)
-                if error as? ClaudeServiceError == .warmupNotStarted,
-                   let attemptedTarget,
-                   cycle.lastWarmupTargetAt == attemptedTarget {
-                    cycle.lastWarmupTargetAt = nil
-                }
                 record(.failed, message: "수동 워밍 실패: \(error.localizedDescription)")
                 store.saveDailyCycle(cycle)
             }
@@ -349,61 +334,95 @@ final class AppState: ObservableObject {
         statusMessage = "\(event.windowNumber)번째 창 확인 중"
 
         Task {
-            var quotaOperationID = UUID().uuidString
+            let quotaOperationID = UUID().uuidString
             do {
-                var inspection = try await inspectScheduled(quotaOperationID)
-                connectionState = .connected
-                logQuotaDecision(
-                    inspection.quota,
-                    phase: "scheduled_pre",
-                    operationID: inspection.operationID,
-                    event: event
+                let result = try await checkSession(
+                    targetAt: event.targetAt, event: event, context: "scheduled",
+                    operationID: quotaOperationID, deadline: engine.timing(for: event.targetAt).expiresAt
                 )
-                if isFreshWindow(inspection.quota, for: event) {
-                    complete(event, quota: inspection.quota, status: .satisfied, message: "이미 열린 창을 확인했습니다.")
-                } else if inspection.quota.active {
-                    throw AppStateError.quotaNotReset
-                } else if shouldSuppressWarmup(for: event.targetAt, at: clock()) {
-                    throw AppStateError.quotaNotActivated
-                } else {
-                    cycle.lastWarmupTargetAt = event.targetAt
-                    store.saveDailyCycle(cycle)
-                    status = .warming
-                    statusMessage = "\(event.windowNumber)번째 창 워밍 중"
-                    var warmupMetadata = scheduledMetadata(event)
-                    let warmupOperationID = UUID().uuidString
-                    warmupMetadata["context"] = "scheduled"
-                    warmupMetadata["operation_id"] = warmupOperationID
-                    diagnosticLog("warmup.requested", warmupMetadata)
-                    try await warmScheduled(inspection.cliURL, warmupOperationID)
-                    quotaOperationID = UUID().uuidString
-                    inspection = try await inspectScheduled(quotaOperationID)
-                    logQuotaDecision(
-                        inspection.quota,
-                        phase: "scheduled_post",
-                        operationID: inspection.operationID,
-                        event: event
-                    )
-                    guard isFreshWindow(inspection.quota, for: event) else {
-                        throw AppStateError.quotaNotActivated
-                    }
-                    complete(event, quota: inspection.quota, status: .succeeded, message: "워밍이 완료되었습니다.")
-                }
+                complete(event, quota: result.inspection.quota,
+                         status: result.status,
+                         message: result.message)
             } catch {
                 var failureMetadata = scheduledMetadata(event)
                 failureMetadata["operation_id"] = quotaOperationID
                 failureMetadata["error_code"] = diagnosticErrorCode(error)
                 diagnosticLog("window.attempt_failed", failureMetadata)
                 updateConnectionFailure(error)
-                if error as? ClaudeServiceError == .warmupNotStarted,
-                   cycle.lastWarmupTargetAt == event.targetAt {
-                    cycle.lastWarmupTargetAt = nil
-                    store.saveDailyCycle(cycle)
-                }
                 handleTargetFailure(error, event: event)
             }
             isWorking = false
         }
+    }
+
+    /// 수동·자동 워밍의 조회, 중복 방지, 호출, 활성화 확인을 동일하게 처리한다.
+    private func checkSession(
+        targetAt: Date, event: ScheduledEvent?, context: String, operationID: String,
+        deadline: Date? = nil
+    ) async throws -> SessionCheckResult {
+        let initial = try await inspectClaude(operationID)
+        connectionState = .connected
+        cacheQuota(initial.quota)
+        logQuotaDecision(initial.quota, phase: "\(context)_pre", operationID: operationID, event: event)
+        if sessionIsActive(initial.quota, event: event) {
+            return SessionCheckResult(inspection: initial, performedWarmup: false)
+        }
+        guard !initial.quota.active else { throw AppStateError.quotaNotReset }
+
+        let suppressed = shouldSuppressWarmup(for: targetAt, at: clock())
+        var warmupError: Error?
+        if !suppressed {
+            cycle.lastWarmupTargetAt = targetAt
+            store.saveDailyCycle(cycle)
+            status = .warming
+            statusMessage = "세션을 활성화하고 있습니다."
+            let warmupOperationID = UUID().uuidString
+            var metadata = event.map(scheduledMetadata) ?? [:]
+            metadata["context"] = context
+            metadata["operation_id"] = warmupOperationID
+            diagnosticLog("warmup.requested", metadata)
+            do {
+                try await warmClaude(initial.cliURL, warmupOperationID)
+            } catch {
+                if error as? ClaudeServiceError == .warmupNotStarted {
+                    cycle.lastWarmupTargetAt = nil
+                    store.saveDailyCycle(cycle)
+                    throw error
+                }
+                guard error as? ClaudeServiceError == .warmupTimedOut
+                        || error as? ClaudeServiceError == .warmupFailed else { throw error }
+                // 전송은 됐을 수 있으므로 응답 판정 실패도 새 호출 없이 확인한다.
+                warmupError = error
+            }
+        }
+
+        record(.checking, message: "세션 활성화를 확인하고 있습니다.")
+        store.saveDailyCycle(cycle)
+        var lastError = warmupError
+        let confirmationDeadline = min(clock().addingTimeInterval(60), deadline ?? .distantFuture)
+        for seconds in [5, 10, 15, 15, 15] {
+            if clock().addingTimeInterval(Double(seconds)) > confirmationDeadline { break }
+            try await confirmationSleep(.seconds(seconds))
+            let inspection: Inspection
+            do {
+                inspection = try await inspectClaude(operationID)
+            } catch {
+                guard Self.shouldRetryScheduledFailure(error) else { throw error }
+                lastError = error
+                continue
+            }
+            cacheQuota(inspection.quota)
+            logQuotaDecision(inspection.quota, phase: "\(context)_post", operationID: operationID, event: event)
+            if sessionIsActive(inspection.quota, event: event) {
+                return SessionCheckResult(inspection: inspection, performedWarmup: !suppressed)
+            }
+        }
+        throw lastError ?? AppStateError.quotaNotActivated
+    }
+
+    private func sessionIsActive(_ quota: QuotaWindow, event: ScheduledEvent?) -> Bool {
+        if let event { return isFreshWindow(quota, for: event) }
+        return quota.active && quota.resetsAt != nil
     }
 
     func markScheduledWindowStarted(_ event: ScheduledEvent) {
@@ -487,10 +506,9 @@ final class AppState: ObservableObject {
         let failureMessage = cycle.firstFailure!.message
         let expiresAt = engine.timing(for: event.targetAt).expiresAt
         let retryAt = now.addingTimeInterval(30)
-        record(.failed, message: failureMessage)
-        store.saveDailyCycle(cycle)
-
         if Self.shouldRetryScheduledFailure(error), retryAt <= expiresAt {
+            record(.checking, message: "잠시 후 세션 상태를 다시 확인합니다.")
+            store.saveDailyCycle(cycle)
             var metadata = scheduledMetadata(event)
             metadata["retry_at"] = diagnosticDate(retryAt)
             metadata["deadline_at"] = diagnosticDate(expiresAt)
@@ -584,11 +602,6 @@ final class AppState: ObservableObject {
             "fallback_at": diagnosticDate(cycle.nextResetAt),
             "handled_windows": "\(cycle.handledWindows)"
         ])
-    }
-
-    func hasRecentWarmupAttempt(at now: Date) -> Bool {
-        guard let target = cycle.lastWarmupTargetAt else { return false }
-        return (0...ScheduleEngine.windowTolerance).contains(now.timeIntervalSince(target))
     }
 
     func shouldSuppressWarmup(for targetAt: Date, at now: Date) -> Bool {
@@ -720,6 +733,17 @@ final class AppState: ObservableObject {
                 )
             }
         }.value
+    }
+}
+
+private struct SessionCheckResult {
+    let inspection: Inspection
+    let performedWarmup: Bool
+
+    var status: WarmupStatus { performedWarmup ? .succeeded : .satisfied }
+
+    var message: String {
+        performedWarmup ? "세션 활성화를 확인했습니다." : "이미 세션이 활성화되었습니다."
     }
 }
 
