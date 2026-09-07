@@ -47,6 +47,13 @@ struct WarmupRecord: Codable, Equatable, Sendable {
     var timestamp: Date
     var status: WarmupStatus
     var message: String
+
+    var displayMessage: String {
+        if status == .satisfied, message == "이미 열린 창을 확인했습니다." {
+            return "이미 세션이 활성화되었습니다."
+        }
+        return message
+    }
 }
 
 struct ScheduledWindowFailure: Codable, Equatable, Sendable {

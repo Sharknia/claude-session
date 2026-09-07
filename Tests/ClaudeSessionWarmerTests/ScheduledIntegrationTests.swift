@@ -48,13 +48,8 @@ final class ScheduledIntegrationTests: XCTestCase {
         let first = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
         state.handle(first)
         try await finish(state)
-        XCTAssertEqual(state.status, .failed)
-        let retry = try XCTUnwrap(state.nextEvent)
-        let restarted = makeState(store, engine, retry.date, backend)
-        restarted.handle(retry)
-        try await finish(restarted)
-        XCTAssertEqual(restarted.status, .satisfied)
-        XCTAssertEqual(restarted.cycle.handledWindows, 1)
+        XCTAssertEqual(state.status, .succeeded)
+        XCTAssertEqual(state.cycle.handledWindows, 1)
         let counts = await backend.counts()
         XCTAssertEqual(counts.warmups, 1)
     }
@@ -74,11 +69,105 @@ final class ScheduledIntegrationTests: XCTestCase {
         XCTAssertEqual(counts.inspections, 1)
     }
 
+    func testManualAndScheduledWaitForActivationWithoutFailureOrStaleQuota() async throws {
+        for manual in [false, true] {
+            let (store, engine, target, cleanup) = fixture()
+            defer { cleanup() }
+            store.saveQuotaCache(QuotaCache(quota: QuotaWindow(active: true, usedPercent: 100, resetsAt: target), fetchedAt: Date()))
+            let backend = FakeScheduledBackend(quotas: [
+                QuotaWindow(active: false, usedPercent: 0),
+                QuotaWindow(active: false, usedPercent: 0),
+                QuotaWindow(active: false, usedPercent: 0),
+                QuotaWindow(active: true, usedPercent: 0, resetsAt: target.addingTimeInterval(18_000))
+            ])
+            let probe = ConfirmationProbe()
+            let state = AppState(store: store, engine: engine, startScheduler: false,
+                clock: { target }, inspectClaude: { try await backend.inspect($0) },
+                warmClaude: { _, _ in try await backend.warm() },
+                confirmationSleep: { await probe.capture($0) })
+            probe.state = state
+            if manual { state.manualWarmup() }
+            else { state.handle(ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)) }
+            try await finish(state)
+            XCTAssertEqual(probe.delays, [.seconds(5), .seconds(10), .seconds(15)])
+            XCTAssertEqual(probe.statuses, [.checking, .checking, .checking])
+            XCTAssertEqual(probe.usedPercent, [0, 0, 0])
+            XCTAssertEqual(state.status, .succeeded)
+            XCTAssertEqual(state.statusMessage, "세션 활성화를 확인했습니다.")
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.warmups, 1)
+            XCTAssertEqual(counts.inspections, 4)
+        }
+    }
+
+    func testManualAndScheduledAlreadyActiveUseSameMessageAndNeverWarm() async throws {
+        for manual in [false, true] {
+            let (store, engine, target, cleanup) = fixture()
+            defer { cleanup() }
+            let backend = FakeScheduledBackend(quotas: [QuotaWindow(active: true, resetsAt: target.addingTimeInterval(18_000))])
+            let state = makeState(store, engine, target, backend)
+            if manual { state.manualWarmup() }
+            else { state.handle(ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)) }
+            try await finish(state)
+            XCTAssertEqual(state.status, .satisfied)
+            XCTAssertEqual(state.statusMessage, "이미 세션이 활성화되었습니다.")
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.warmups, 0)
+            XCTAssertEqual(counts.inspections, 1)
+        }
+    }
+
+    func testConfirmationExhaustionIsBoundedAndRestartDoesNotResend() async throws {
+        for manual in [false, true] {
+            let (store, engine, target, cleanup) = fixture()
+            defer { cleanup() }
+            let backend = FakeScheduledBackend(quotas:
+                Array(repeating: QuotaWindow(active: false), count: 6)
+                + [QuotaWindow(active: true, resetsAt: target.addingTimeInterval(18_000))])
+            let probe = ConfirmationProbe()
+            let state = AppState(store: store, engine: engine, startScheduler: false,
+                clock: { target }, inspectClaude: { try await backend.inspect($0) },
+                warmClaude: { _, _ in try await backend.warm() },
+                confirmationSleep: { await probe.capture($0) })
+            probe.state = state
+            if manual { state.manualWarmup() }
+            else { state.handle(ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)) }
+            try await finish(state)
+            XCTAssertEqual(probe.delays, [.seconds(5), .seconds(10), .seconds(15), .seconds(15), .seconds(15)])
+            XCTAssertTrue(probe.statuses.allSatisfy { $0 == .checking })
+            XCTAssertEqual(state.status, manual ? .failed : .checking)
+            let restarted = makeState(store, engine, target.addingTimeInterval(30), backend)
+            if manual { restarted.manualWarmup() }
+            else { restarted.handle(try XCTUnwrap(state.nextEvent)) }
+            try await finish(restarted)
+            XCTAssertEqual(restarted.status, .satisfied)
+            let counts = await backend.counts()
+            XCTAssertEqual(counts.warmups, 1)
+            XCTAssertEqual(counts.inspections, 7)
+        }
+    }
+
+    func testRecentManualAttemptOnlyChecksQuotaWithoutAnotherWarmup() async throws {
+        let (store, engine, target, cleanup) = fixture()
+        defer { cleanup() }
+        store.saveDailyCycle(DailyCycle(lastWarmupTargetAt: target.addingTimeInterval(-30)))
+        let backend = FakeScheduledBackend(quotas: [QuotaWindow(active: false),
+            QuotaWindow(active: true, resetsAt: target.addingTimeInterval(18_000))])
+        let state = makeState(store, engine, target, backend)
+        state.manualWarmup()
+        try await finish(state)
+        XCTAssertEqual(state.status, .satisfied)
+        let counts = await backend.counts()
+        XCTAssertEqual(counts.warmups, 0)
+        XCTAssertEqual(counts.inspections, 2)
+    }
+
     private func makeState(_ store: SettingsStore, _ engine: ScheduleEngine, _ now: Date, _ backend: FakeScheduledBackend) -> AppState {
         AppState(store: store, engine: engine, startScheduler: false,
                  clock: { now },
-                 inspectScheduled: { try await backend.inspect($0) },
-                 warmScheduled: { _, _ in try await backend.warm() })
+                 inspectClaude: { try await backend.inspect($0) },
+                 warmClaude: { _, _ in try await backend.warm() },
+                 confirmationSleep: { _ in })
     }
 
     private func finish(_ state: AppState) async throws {
@@ -128,4 +217,20 @@ private actor FakeScheduledBackend {
     }
 
     func counts() -> (inspections: Int, warmups: Int) { (inspections, warmups) }
+}
+
+@MainActor
+private final class ConfirmationProbe {
+    weak var state: AppState?
+    var delays: [Duration] = []
+    var statuses: [WarmupStatus] = []
+    var usedPercent: [Double?] = []
+
+    func capture(_ delay: Duration) {
+        delays.append(delay)
+        if let state {
+            statuses.append(state.status)
+            usedPercent.append(state.currentQuota?.usedPercent)
+        }
+    }
 }
