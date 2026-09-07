@@ -22,6 +22,7 @@ enum ClaudeServiceError: LocalizedError, Equatable {
     case managedCredentialsUnavailable
     case loginCaptureFailed
     case oauthLoginTimedOut
+    case oauthRefreshUnavailable
     case oauthRefreshFailed
     case invalidUsageResponse
     case quotaUnauthorized
@@ -38,6 +39,7 @@ enum ClaudeServiceError: LocalizedError, Equatable {
         case .managedCredentialsUnavailable: return "Claude 연결이 필요합니다. Claude 로그인을 눌러 주세요."
         case .loginCaptureFailed: return "Claude 로그인 뒤 OAuth 인증 정보를 가져오지 못했습니다."
         case .oauthLoginTimedOut: return "Claude 로그인이 시간 안에 완료되지 않았습니다. 다시 시도해 주세요."
+        case .oauthRefreshUnavailable: return "Claude 인증 갱신 서비스에 일시적으로 연결하지 못했습니다."
         case .oauthRefreshFailed: return "Claude 연결을 갱신하지 못했습니다. Mac 잠금을 해제한 뒤 다시 연결해 주세요."
         case .invalidUsageResponse: return "사용량 응답 형식이 올바르지 않습니다."
         case .quotaUnauthorized: return "Claude 인증이 만료됐을 수 있습니다. Mac 잠금을 해제한 뒤 다시 연결해 주세요."
@@ -180,10 +182,24 @@ struct ClaudeWarmupCommand: Equatable {
         }
         return ClaudeWarmupCommand(
             executableURL: executableURL,
-            arguments: ["--safe-mode", "--tools", "", "--model", "haiku", "--effort", "low"],
+            arguments: ["--safe-mode", "--tools", "", "--model", "haiku", "--effort", "low", "--ax-screen-reader"],
             environment: environment,
             prompt: "Confirm readiness using the uppercase ASCII token formed by C plus W, then an underscore, WARMUP, another underscore, and O plus K."
         )
+    }
+}
+
+enum ClaudeWarmupOutput {
+    static func receivedSuccess(in data: Data) -> Bool {
+        var text = String(decoding: data, as: UTF8.self)
+        // OSC 제목·메타데이터와 ANSI 장식을 제외하고 화면 읽기 모드의 답변만 판정한다.
+        for pattern in [#"\x1B\][^\x07\x1B]*(?:\x07|\x1B\\)"#, #"\x1B\[[0-?]*[ -/]*[@-~]"#] {
+            text = text.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
+        }
+        return text.range(
+            of: #"(?m)^claude: [^\r\n]*\bCW_WARMUP_OK\b"#,
+            options: .regularExpression
+        ) != nil
     }
 }
 
@@ -243,15 +259,24 @@ struct ManagedClaudeCredential: Codable, Equatable, Sendable {
     }
 }
 
-private actor ManagedCredentialRefreshCoordinator {
-    private var inFlight: Task<ManagedClaudeCredential, Error>?
+/// await 중에도 읽기 → 갱신 → 저장 전체를 직렬화한다.
+/// 대기자는 앞선 호출의 저장이 끝난 뒤 최신 credential을 다시 읽는다.
+actor ManagedCredentialRefreshCoordinator {
+    private var busy = false
+    private var waiters: [CheckedContinuation<Void, Never>] = []
 
     func run(_ operation: @escaping @Sendable () async throws -> ManagedClaudeCredential) async throws -> ManagedClaudeCredential {
-        if let inFlight { return try await inFlight.value }
-        let task = Task { try await operation() }
-        inFlight = task
-        defer { inFlight = nil }
-        return try await task.value
+        if busy {
+            await withCheckedContinuation { waiters.append($0) }
+        } else {
+            busy = true
+        }
+        defer {
+            if waiters.isEmpty { busy = false }
+            else { waiters.removeFirst().resume() }
+        }
+        try Task.checkCancellation()
+        return try await operation()
     }
 }
 
@@ -343,8 +368,10 @@ final class ClaudeService {
                 throw ClaudeServiceError.loginCaptureFailed
             }
             let credential = try ClaudeOAuthFlow.parseTokenResponse(data)
-            try storeManagedCredential(credential)
-            return credential
+            return try await Self.refreshCoordinator.run {
+                try ClaudeService().storeManagedCredential(credential)
+                return credential
+            }
         } catch let error as ClaudeServiceError {
             throw error
         } catch {
@@ -393,37 +420,39 @@ final class ClaudeService {
     }
 
     private func refreshedManagedCredentialIfNeeded(session: URLSession, force: Bool) async throws -> ManagedClaudeCredential {
-        let credential = try readManagedCredential()
-        guard force || credential.needsRefresh() else { return credential }
-        diagnosticLog("oauth.refresh_requested", [
-            "operation_id": DiagnosticContext.operationID ?? "none",
-            "reason": force ? "forced_after_unauthorized" : "expiry_window",
-            "previous_expires_at": diagnosticDate(credential.expiresAt)
-        ])
-        do {
-            let refreshed = try await Self.refreshCoordinator.run {
-                try await Self.refreshManagedCredential(credential, session: session)
+        try await Self.refreshCoordinator.run {
+            let service = ClaudeService()
+            let credential = try service.readManagedCredential()
+            guard force || credential.needsRefresh() else { return credential }
+            diagnosticLog("oauth.refresh_requested", [
+                "operation_id": DiagnosticContext.operationID ?? "none",
+                "reason": force ? "forced" : "expiry_window",
+                "previous_expires_at": diagnosticDate(credential.expiresAt)
+            ])
+            do {
+                let refreshed = try await Self.refreshManagedCredential(credential, session: session)
+                // 회전된 refresh token을 다음 호출에 넘기기 전에 즉시 저장한다.
+                try service.storeManagedCredential(refreshed)
+                diagnosticLog("oauth.refresh_completed", [
+                    "operation_id": DiagnosticContext.operationID ?? "none",
+                    "outcome": "success",
+                    "new_expires_at": diagnosticDate(refreshed.expiresAt),
+                    "refresh_rotated": refreshed.refreshToken == credential.refreshToken ? "false" : "true"
+                ])
+                return refreshed
+            } catch {
+                diagnosticLog("oauth.refresh_completed", [
+                    "operation_id": DiagnosticContext.operationID ?? "none",
+                    "outcome": "failed",
+                    "error_code": Self.diagnosticErrorCode(error)
+                ])
+                throw error
             }
-            try storeManagedCredential(refreshed)
-            diagnosticLog("oauth.refresh_completed", [
-                "operation_id": DiagnosticContext.operationID ?? "none",
-                "outcome": "success",
-                "new_expires_at": diagnosticDate(refreshed.expiresAt),
-                "refresh_rotated": refreshed.refreshToken == credential.refreshToken ? "false" : "true"
-            ])
-            return refreshed
-        } catch {
-            diagnosticLog("oauth.refresh_completed", [
-                "operation_id": DiagnosticContext.operationID ?? "none",
-                "outcome": "failed",
-                "error_code": Self.diagnosticErrorCode(error)
-            ])
-            throw error
         }
     }
 
     private static func refreshManagedCredential(_ credential: ManagedClaudeCredential, session: URLSession) async throws -> ManagedClaudeCredential {
-        let request = makeRefreshRequest(refreshToken: credential.refreshToken)
+        let request = makeRefreshRequest(refreshToken: credential.refreshToken, scopes: credential.scopes)
         let startedAt = Date()
         let data: Data
         let response: URLResponse
@@ -435,33 +464,50 @@ final class ClaudeService {
                 "outcome": "network_error",
                 "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
             ])
-            throw ClaudeServiceError.oauthRefreshFailed
+            throw ClaudeServiceError.oauthRefreshUnavailable
         }
         let statusCode = (response as? HTTPURLResponse)?.statusCode
         diagnosticLog("oauth.refresh_http", [
             "operation_id": DiagnosticContext.operationID ?? "none",
             "outcome": statusCode == 200 ? "success" : "http_error",
             "status_code": statusCode.map(String.init) ?? "none",
+            "oauth_error": statusCode == 200 ? "none" : Self.safeOAuthErrorCode(data),
             "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
         ])
-        guard let http = response as? HTTPURLResponse, http.statusCode == 200,
-              let refreshed = mergeRefreshResponse(data, into: credential) else {
+        guard statusCode == 200 else { throw Self.refreshError(for: statusCode) }
+        guard let refreshed = mergeRefreshResponse(data, into: credential) else {
             throw ClaudeServiceError.oauthRefreshFailed
         }
         return refreshed
     }
 
-    static func makeRefreshRequest(refreshToken: String) -> URLRequest {
+    /// 서버 본문과 자유 형식 설명은 인증 정보를 포함할 수 있어 기록하지 않는다.
+    static func safeOAuthErrorCode(_ data: Data) -> String {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return "unknown" }
+        let code = object["error"] as? String ?? (object["error"] as? [String: Any])?["type"] as? String
+        let allowed = ["invalid_scope", "invalid_grant", "invalid_client", "invalid_request", "unauthorized_client", "unsupported_grant_type", "server_error", "temporarily_unavailable"]
+        return code.flatMap { allowed.contains($0) ? $0 : nil } ?? "unknown"
+    }
+
+    static func refreshError(for statusCode: Int?) -> ClaudeServiceError {
+        guard let statusCode else { return .oauthRefreshUnavailable }
+        return statusCode == 429 || (500...599).contains(statusCode)
+            ? .oauthRefreshUnavailable : .oauthRefreshFailed
+    }
+
+    static func makeRefreshRequest(refreshToken: String, scopes: [String]) -> URLRequest {
         var request = URLRequest(url: oauthTokenURL)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.httpBody = try? JSONSerialization.data(withJSONObject: [
+        var body = [
             "grant_type": "refresh_token",
             "refresh_token": refreshToken,
-            "client_id": oauthClientID,
-            "scope": ClaudeOAuthFlow.scope
-        ])
+            "client_id": oauthClientID
+        ]
+        // RFC 6749 §6: 발급된 권한을 확대하지 않는다. 모르면 scope를 생략한다.
+        if !scopes.isEmpty { body["scope"] = scopes.joined(separator: " ") }
+        request.httpBody = try? JSONSerialization.data(withJSONObject: body)
         return request
     }
 
@@ -582,6 +628,7 @@ final class ClaudeService {
         case .loginCaptureFailed: return "oauth_login_failed"
         case .oauthLoginTimedOut: return "oauth_login_timeout"
         case .oauthRefreshFailed: return "oauth_refresh_failed"
+        case .oauthRefreshUnavailable: return "oauth_refresh_unavailable"
         case .invalidUsageResponse: return "usage_parse_failed"
         case .quotaUnauthorized: return "usage_unauthorized"
         case .quotaRateLimited: return "usage_rate_limited"
@@ -592,7 +639,7 @@ final class ClaudeService {
         }
     }
 
-    /// 이 메서드는 실제 워밍 실행 경로다. 테스트에서는 호출하지 않는다.
+    /// 실제 CLI 또는 테스트용 실행 파일을 PTY로 실행한다.
     func performWarmup(command: ClaudeWarmupCommand, timeout: TimeInterval = 30) throws {
         let diagnosticStartedAt = Date()
         var diagnosticOutcome = "setup_failed"
@@ -617,7 +664,8 @@ final class ClaudeService {
 
         var masterFD: Int32 = -1
         var slaveFD: Int32 = -1
-        guard openpty(&masterFD, &slaveFD, nil, nil, nil) == 0 else {
+        var terminalSize = winsize(ws_row: 40, ws_col: 120, ws_xpixel: 0, ws_ypixel: 0)
+        guard openpty(&masterFD, &slaveFD, nil, nil, &terminalSize) == 0 else {
             diagnosticOutcome = "pty_open_failed"
             throw ClaudeServiceError.warmupNotStarted
         }
@@ -639,7 +687,8 @@ final class ClaudeService {
         let process = Process()
         diagnosticProcess = process
         process.executableURL = command.executableURL
-        process.arguments = command.arguments
+        // raw-mode 준비 전에 PTY에 Enter를 쓰면 입력창에 남고 전송되지 않을 수 있다.
+        process.arguments = command.arguments + ["--", command.prompt]
         process.environment = command.environment
         process.currentDirectoryURL = temporaryDirectory
         let slave = FileHandle(fileDescriptor: slaveFD, closeOnDealloc: false)
@@ -668,13 +717,6 @@ final class ClaudeService {
         slaveFD = -1
 
         _ = fcntl(masterFD, F_SETFL, fcntl(masterFD, F_GETFL) | O_NONBLOCK)
-        do {
-            try writeToPTY("\(command.prompt)\r", fd: masterFD)
-        } catch {
-            diagnosticOutcome = "pty_write_failed"
-            requiredForcedStop = process.isRunning
-            throw error
-        }
         let deadline = Date().addingTimeInterval(timeout)
         var output = Data()
         var receivedMarker = false
@@ -683,7 +725,9 @@ final class ClaudeService {
             let count = read(masterFD, &buffer, buffer.count)
             if count > 0 {
                 output.append(buffer, count: count)
-                if String(data: output, encoding: .utf8)?.contains(ClaudeWarmupCommand.successMarker) == true {
+                // 전체 대화는 저장하지 않고 판정에 필요한 마지막 출력만 유지한다.
+                if output.count > 65_536 { output = Data(output.suffix(65_536)) }
+                if ClaudeWarmupOutput.receivedSuccess(in: output) {
                     receivedMarker = true
                     try? writeToPTY("/exit\r", fd: masterFD)
                     break

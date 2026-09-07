@@ -49,24 +49,32 @@ struct WarmupRecord: Codable, Equatable, Sendable {
     var message: String
 }
 
+struct ScheduledWindowFailure: Codable, Equatable, Sendable {
+    var targetAt: Date
+    var message: String
+}
+
 struct DailyCycle: Codable, Equatable, Sendable {
     var dayKey: String?
     var handledWindows: Int
     var nextResetAt: Date?
     var lastWarmupTargetAt: Date?
     var lastRecord: WarmupRecord?
+    var firstFailure: ScheduledWindowFailure?
 
     init(
         dayKey: String? = nil,
         handledWindows: Int = 0,
         nextResetAt: Date? = nil,
         lastWarmupTargetAt: Date? = nil,
-        lastRecord: WarmupRecord? = nil
+        lastRecord: WarmupRecord? = nil,
+        firstFailure: ScheduledWindowFailure? = nil
     ) {
         self.dayKey = dayKey
         self.handledWindows = min(max(handledWindows, 0), 3)
         self.nextResetAt = nextResetAt
         self.lastWarmupTargetAt = lastWarmupTargetAt
         self.lastRecord = lastRecord
+        self.firstFailure = firstFailure
     }
 }
