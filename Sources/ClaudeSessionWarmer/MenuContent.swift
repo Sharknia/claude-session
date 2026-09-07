@@ -223,7 +223,7 @@ struct MenuContent: View {
                     }
                     .font(.caption)
                     .foregroundStyle(.secondary)
-                    Text(record.message)
+                    Text(record.displayMessage)
                         .font(.subheadline)
                         .lineLimit(2)
                 }

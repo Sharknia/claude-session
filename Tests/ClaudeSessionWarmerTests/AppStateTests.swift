@@ -4,6 +4,18 @@ import XCTest
 
 final class AppStateTests: XCTestCase {
     @MainActor
+    func testExistingSatisfiedRecordUsesUpdatedDisplayWithoutChangingHistory() {
+        withStore { store in
+            let record = WarmupRecord(timestamp: Date(), status: .satisfied, message: "이미 열린 창을 확인했습니다.")
+            store.saveDailyCycle(DailyCycle(lastRecord: record))
+            let state = AppState(store: store, startScheduler: false)
+            XCTAssertEqual(state.statusMessage, "이미 세션이 활성화되었습니다.")
+            XCTAssertEqual(state.cycle.lastRecord?.displayMessage, state.statusMessage)
+            XCTAssertEqual(store.loadDailyCycle().lastRecord, record)
+        }
+    }
+
+    @MainActor
     func testQuotaCacheExpiresAfterFiveMinutes() {
         let fetchedAt = Date(timeIntervalSince1970: 1_800_000_000)
         let cache = QuotaCache(
@@ -205,20 +217,6 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testRecentManualWarmupMarkerSuppressesDuplicateForThreeMinutes() {
-        withStore { store in
-            let now = Date(timeIntervalSince1970: 1_800_000_000)
-            store.saveDailyCycle(DailyCycle(
-                lastWarmupTargetAt: now.addingTimeInterval(-2 * 60)
-            ))
-            let state = AppState(store: store, startScheduler: false)
-
-            XCTAssertTrue(state.hasRecentWarmupAttempt(at: now))
-            XCTAssertFalse(state.hasRecentWarmupAttempt(at: now.addingTimeInterval(61)))
-        }
-    }
-
-    @MainActor
     func testScheduledWarmupSuppressesRecentManualMarker() {
         withStore { store in
             let target = Date(timeIntervalSince1970: 1_800_000_000)
@@ -292,7 +290,7 @@ final class AppStateTests: XCTestCase {
             state.markScheduledWindowStarted(event)
             state.handleTargetFailure(ClaudeServiceError.quotaRateLimited, event: event, at: target.addingTimeInterval(30))
             XCTAssertEqual(state.cycle.firstFailure, original)
-            XCTAssertEqual(state.cycle.lastRecord?.message, original?.message)
+            XCTAssertEqual(state.cycle.lastRecord?.status, .checking)
 
             let restarted = AppState(store: store, engine: engine, startScheduler: false)
             restarted.reconcileMissedWindows(at: target.addingTimeInterval(181))

@@ -8,7 +8,7 @@
 - 실제 앱 Keychain의 비대화형 읽기 성공. 확인 시 access token 만료는 2026-09-07 18:13:17 KST. 이후 앱에서 추가 갱신이 일어날 수 있으므로 내일 실제 로그의 `previous_expires_at`으로 다시 판정한다.
 - 실제 설정은 첫 시각 06:00, 월~금, 한국 공휴일 제외, 로그인 시 실행 켜짐이다. 9월 8일은 실행 대상이다.
 - 현재 AC 전원 연결, AC 시스템 잠자기 0. 배터리 전원 잠자기는 1이므로 야간에는 전원 연결과 덮개 열림을 유지해야 한다. 시스템 전원 설정은 변경하지 않았다.
-- 검증용 앱 0.1.2 빌드 4, Developer ID Application: HakKyeol Lee (V9SQZ6B7RP) 서명. 공증·stapling된 설치본을 사용하며 무인 실검증 합격 여부는 별도로 판정한다. `app.started.app_build`에 빌드를 기록한다. 최종 배포 합격 표시는 실제 검증 이후에 한다.
+- 검증용 앱 0.1.3 빌드 5, Developer ID Application: HakKyeol Lee (V9SQZ6B7RP) 서명. 공증·stapling된 설치본을 사용하며 무인 실검증 합격 여부는 별도로 판정한다. `app.started.app_build`에 빌드를 기록한다. 최종 배포 합격 표시는 실제 검증 이후에 한다.
 - 오늘 14:41 능동 검증은 내일 06:04 수동 조작 없는 로그 관찰로 변경했다. 사용자는 오늘 Claude 사용을 조절할 필요가 없다.
 
 ## 실제 검증
@@ -19,7 +19,7 @@
 
 `~/Library/Logs/ClaudeSessionWarmer/events.jsonl`과 이전 파일에서 `target_at=2026-09-07T21:00:00.000Z`를 찾고 아래를 같은 launch 및 operation으로 연결한다.
 
-1. 빌드 4의 시작 기록과 화면 잠금 이벤트. 실행 완료까지 잠금 해제 및 시스템 잠자기가 없는지 확인한다. 이벤트가 부족하면 잠금 검증은 미확인이다.
+1. 빌드 5의 시작 기록과 화면 잠금 이벤트. 실행 완료까지 잠금 해제 및 시스템 잠자기가 없는지 확인한다. 이벤트가 부족하면 잠금 검증은 미확인이다.
 2. 06:00 `timer.fired`와 지연 시간.
 3. 이미 만료된 `previous_expires_at` → `oauth.refresh_http` 200 → `oauth.refresh_completed` 성공. 완료 로그는 Keychain 저장 이후 기록된다. 토큰이 만료되지 않았다면 만료 갱신 조건은 미검증이다.
 4. `quota.decision`의 `scheduled_pre`가 비활성. 이미 활성 상태라면 `already_active`는 정상 동작이지만 새 창 생성 합격은 아니다.
