@@ -13,14 +13,16 @@ readonly APP_ICON_SOURCE="$PROJECT_DIR/packaging/AppIcon.icns"
 readonly MENU_BAR_ICON_SOURCE="$PROJECT_DIR/packaging/MenuBarTemplate.pdf"
 readonly REQUIREMENTS_FILE="$PROJECT_DIR/packaging/designated-requirement.txt"
 readonly CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: HakKyeol Lee (V9SQZ6B7RP)}"
+APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$INFO_PLIST_SOURCE")"
+readonly APP_VERSION
 readonly RELEASE_BUILD="${RELEASE_BUILD:-0}"
 if [[ "$RELEASE_BUILD" == "1" ]]; then
     : "${NOTARY_PROFILE:?RELEASE_BUILD=1에는 NOTARY_PROFILE이 필요합니다.}"
-    readonly DMG_PATH="$DIST_DIR/$APP_NAME-0.1.0.dmg"
+    readonly DMG_PATH="$DIST_DIR/$APP_NAME-$APP_VERSION.dmg"
 else
-    readonly DMG_PATH="$DIST_DIR/$APP_NAME-0.1.0-dev.dmg"
+    readonly DMG_PATH="$DIST_DIR/$APP_NAME-$APP_VERSION-dev.dmg"
 fi
-readonly VOLUME_NAME="Claude Session Warmer 0.1.0"
+readonly VOLUME_NAME="Claude Session Warmer $APP_VERSION"
 
 if [[ ! -f "$PROJECT_DIR/Package.swift" || ! -f "$INFO_PLIST_SOURCE" || ! -f "$APP_ICON_SOURCE" || ! -f "$MENU_BAR_ICON_SOURCE" || ! -f "$REQUIREMENTS_FILE" ]]; then
     echo "오류: 프로젝트 루트 또는 필수 packaging 파일을 찾을 수 없습니다." >&2

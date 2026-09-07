@@ -45,7 +45,7 @@ swift test
 
 앱 내 실행 파일과 앱 번들에 hardened runtime·보안 타임스탬프를 적용한 뒤 DMG를 만들고 DMG도 서명합니다. Bundle ID `com.sharknia.ClaudeSessionWarmer`와 Team ID `V9SQZ6B7RP`를 유지합니다. `packaging/designated-requirement.txt`는 같은 팀의 Developer ID 인증서 갱신 후에도 호환되는 조건을 정의합니다. 다른 팀이나 개발용 인증서는 검증 단계에서 거부합니다.
 
-기본 결과물 `dist/ClaudeSessionWarmer-0.1.0-dev.dmg`는 **서명된 내부 검증용**입니다. 공증·stapling 전에는 공개 배포하지 않습니다. 이 Mac에서는 Developer ID 서명의 검증 도구로 기존 앱 Keychain을 비대화형으로 읽는 것까지 확인했습니다.
+기본 결과물 `dist/ClaudeSessionWarmer-0.1.1-dev.dmg`는 **서명된 내부 검증용**입니다. 공증·stapling 전에는 공개 배포하지 않습니다. 이 Mac에서는 Developer ID 서명의 검증 도구로 기존 앱 Keychain을 비대화형으로 읽는 것까지 확인했습니다.
 
 ## 공개 배포 공증
 
@@ -55,7 +55,7 @@ swift test
 RELEASE_BUILD=1 NOTARY_PROFILE="claude-session-notary" ./scripts/build-dmg.sh
 ```
 
-프로필이 없으면 빌드 시작 전에 실패합니다. 앱 ZIP 공증의 `Accepted` 확인 → 앱 stapling·검증·Gatekeeper 평가 → DMG 생성·서명 → DMG 공증의 `Accepted` 확인 → DMG stapling·검증·Gatekeeper 평가를 모두 통과해야 공개 배포 결과물 `dist/ClaudeSessionWarmer-0.1.0.dmg`이 완료됩니다. 현재 실제 공증은 미실행 상태입니다.
+프로필이 없으면 빌드 시작 전에 실패합니다. 앱 ZIP 공증의 `Accepted` 확인 → 앱 stapling·검증·Gatekeeper 평가 → DMG 생성·서명 → DMG 공증의 `Accepted` 확인 → DMG stapling·검증·Gatekeeper 평가를 모두 통과해야 공개 배포 결과물 `dist/ClaudeSessionWarmer-0.1.1.dmg`이 완료됩니다. 현재 실제 공증은 미실행 상태입니다.
 
 Apple 공식 안내: [Developer ID 서명과 공증](https://developer.apple.com/developer-id/).
 
