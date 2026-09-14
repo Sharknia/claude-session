@@ -27,6 +27,10 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
             .combineLatest(state.$isWorking)
             .map { canCheck, working in canCheck && !working }
             .receive(on: DispatchQueue.main)
+            .removeDuplicates()
+            .handleEvents(receiveOutput: { available in
+                diagnosticLog("update.check_availability", ["available": "\(available)"])
+            })
             .assign(to: &$canCheckForUpdates)
         controller.startUpdater()
     }
@@ -71,6 +75,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
+        pendingInstall = nil
         let error = error as NSError
         diagnosticLog("update.aborted", ["domain": error.domain, "code": "\(error.code)"])
     }
