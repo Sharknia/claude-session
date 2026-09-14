@@ -1,8 +1,27 @@
+import Sparkle
 import XCTest
 @testable import ClaudeSessionWarmer
 
 @MainActor
 final class AppUpdaterTests: XCTestCase {
+    func testOneClickInstallationRequiresExplicitApprovalAndClearsItOnDismissal() {
+        let driver = OneClickUpdateUserDriver(hostBundle: .main)
+        XCTAssertFalse(driver.installationApproved)
+        driver.didChoose(.skip)
+        XCTAssertFalse(driver.installationApproved)
+        driver.didChoose(.install)
+        var installResponses = 0
+        driver.showReady(toInstallAndRelaunch: { choice in
+            XCTAssertEqual(choice, .install)
+            installResponses += 1
+        })
+        XCTAssertEqual(installResponses, 1)
+        driver.dismissUpdateInstallation()
+        XCTAssertFalse(driver.installationApproved)
+        driver.didChoose(.dismiss)
+        XCTAssertFalse(driver.installationApproved)
+    }
+
     func testInstallationWaitsForWarmupAndResumesExactlyOnce() async throws {
         let suite = "AppUpdaterTests.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suite)!

@@ -242,6 +242,7 @@ struct MenuContent: View {
                 Button("업데이트 확인") { updater.checkForUpdates() }
                     .buttonStyle(.plain)
                     .disabled(!updater.canCheckForUpdates)
+                    .help("새 버전 설치를 선택하면 다운로드 후 앱이 다시 시작됩니다.")
                 Button("종료") {
                     NSApplication.shared.terminate(nil)
                 }

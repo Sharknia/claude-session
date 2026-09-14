@@ -1,3 +1,4 @@
+import AppKit
 import Combine
 import Foundation
 import Sparkle
@@ -7,7 +8,8 @@ import Sparkle
 final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     @Published private(set) var canCheckForUpdates = false
     private let state: AppState
-    private var controller: SPUStandardUpdaterController?
+    private var updater: SPUUpdater?
+    private var userDriver: OneClickUpdateUserDriver?
     private var observations: Set<AnyCancellable> = []
     private var pendingInstall: (() -> Void)?
 
@@ -19,11 +21,11 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
         }.store(in: &observations)
         // SwiftPM 테스트·CLI에는 배포용 Info.plist가 없으므로 업데이트 UI를 띄우지 않는다.
         guard Bundle.main.bundleURL.pathExtension == "app" else { return }
-        let controller = SPUStandardUpdaterController(
-            startingUpdater: false, updaterDelegate: self, userDriverDelegate: nil
-        )
-        self.controller = controller
-        controller.updater.publisher(for: \.canCheckForUpdates)
+        let userDriver = OneClickUpdateUserDriver(hostBundle: .main)
+        let updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: userDriver, delegate: self)
+        self.userDriver = userDriver
+        self.updater = updater
+        updater.publisher(for: \.canCheckForUpdates)
             .combineLatest(state.$isWorking)
             .map { canCheck, working in canCheck && !working }
             .receive(on: DispatchQueue.main)
@@ -32,13 +34,18 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
                 diagnosticLog("update.check_availability", ["available": "\(available)"])
             })
             .assign(to: &$canCheckForUpdates)
-        controller.startUpdater()
+        do {
+            try updater.start()
+        } catch {
+            diagnosticLog("update.configuration_failed", ["code": "\((error as NSError).code)"])
+            Task { @MainActor in NSAlert(error: error).runModal() }
+        }
     }
 
     func checkForUpdates() {
         guard canCheckForUpdates, !state.isWorking else { return }
         diagnosticLog("update.check_requested")
-        controller?.checkForUpdates(nil)
+        updater?.checkForUpdates()
     }
 
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
