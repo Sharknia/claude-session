@@ -1,6 +1,6 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.3-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.4-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
@@ -17,6 +17,7 @@
 - 현재 사용량, 실행 결과, 다음 예약 확인
 - 수동 워밍 및 macOS 로그인 시 자동 실행
 - 앱 전용 Keychain에 인증 정보를 저장하고 자동 갱신
+- 앱 안에서 업데이트 확인 및 설치·재시작
 
 ## 요구 환경
 
@@ -43,9 +44,12 @@
 
 일정 저장과 Claude 로그인은 별도 동작입니다. 이미 열린 창은 다시 워밍하지 않으며, 첫 창 실행에 실패해도 해당 예약 시각에서 5시간 뒤의 후속 예약은 유지합니다.
 
+메뉴 하단에서 현재 버전을 확인하고 **업데이트 확인**을 누를 수 있습니다. 새 버전의 설치를 승인하면 다운로드·서명 검증 후 앱이 다시 시작됩니다. 자동 설치는 기본으로 켜져 있지 않으며, 워밍 중에는 업데이트를 확인할 수 없습니다. 업데이트 기능이 없는 기존 버전에서는 지원 버전을 한 번 직접 설치해야 합니다.
+
 ## 사용 시 참고
 
 - 화면 잠금이나 디스플레이 꺼짐과 시스템 잠자기는 다릅니다. 예약 실행을 위해 Mac이 깨어 있고 인터넷에 연결돼 있어야 합니다.
+- 예약 전에 잠들었다가 예정 시각 전에 깨어나면 원래 예약 시각을 유지합니다. 잠들었던 시간만큼 예약이 뒤로 밀리지 않도록 복귀 시 일정을 다시 계산합니다.
 - 시스템 잠자기, 덮개 닫힘, 종료 또는 로그아웃으로 놓친 예약은 나중에 따라잡지 않습니다. 밤사이 실행할 때는 전원을 연결하고 덮개를 열어 두세요.
 - 앱은 Claude Code의 인증 정보와 별도로 계정을 연결합니다. 인증 정보는 앱 전용 macOS Keychain에 저장합니다.
 - Anthropic의 공식 앱이나 공식 승인된 제3자 OAuth 통합은 아닙니다. Claude의 인증 방식이나 서비스 정책 변경에 영향을 받을 수 있습니다.

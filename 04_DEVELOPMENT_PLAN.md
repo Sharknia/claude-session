@@ -21,7 +21,7 @@
 | 메뉴바 | `MenuBarExtra` |
 | Claude 실행 | `Process` + `openpty()` |
 | 인증·사용량 | system browser + loopback socket callback + PKCE + Security.framework managed Keychain + `URLSession` |
-| 예약 | one-shot `Timer` |
+| 예약 | `DispatchSourceTimer`의 `wallDeadline` 단발 예약, 잠자기 복귀·시계 변경 시 재계산 |
 | 설정 | `UserDefaults` |
 | macOS 로그인 시 실행 | `SMAppService` |
 | 알림 | `UserNotifications` |
@@ -133,6 +133,7 @@ UI 시안, 자동 업데이트, 다중 제공자 구조, 복잡한 재시도 프
 - +3분 이후 재시도 금지
 - 앱 재시작 후 처리 횟수 복원
 - 잠자기로 놓친 실행의 no-catch-up
+- 예정 시각 전 잠자기·복귀에서 원래 목표 시각 유지, 취소 콜백 무시, 실행 중 재계산 병합
 - 설정 저장과 Claude 로그인 분리
 - callback parser의 method/path/code/state 검증과 listener 종료
 - S256 PKCE·state mismatch·bind 실패·timeout·취소 및 token request 검증
