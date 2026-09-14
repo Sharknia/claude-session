@@ -288,6 +288,7 @@ final class AppState: ObservableObject {
             return
         }
         var metadata = scheduledMetadata(event)
+        metadata["timer_id"] = nil // 새 예약의 식별자는 arm에서 발급한다.
         metadata["selected_at"] = diagnosticDate(now)
         metadata["source"] = event.windowNumber == 1 ? "first" : "reset_or_fallback"
         metadata["handled_windows"] = "\(cycle.handledWindows)"
@@ -323,7 +324,8 @@ final class AppState: ObservableObject {
            engine.position(of: previous.targetAt, at: now) == .missed,
            !(cycle.dayKey == previous.dayKey && cycle.handledWindows >= previous.windowNumber) {
             closeMissed(previous)
-        } else if !mustSelectFresh, let previous,
+        } else if let previous,
+           (!mustSelectFresh || (previous.date > previous.targetAt && hasStartedEvent(previous))),
            candidate?.targetAt == previous.targetAt,
            candidate?.windowNumber == previous.windowNumber,
            candidate?.dayKey == previous.dayKey {
@@ -391,10 +393,12 @@ final class AppState: ObservableObject {
         cancelScheduledTimer()
         metadata["was_working"] = isWorking ? "true" : "false"
         DiagnosticLogger.shared.logAndFlush(event: "timer.fired", metadata: metadata, at: receivedAt)
-        handle(event)
+        DiagnosticContext.$scheduledTimerID.withValue(id.uuidString) {
+            handle(event, timerID: id)
+        }
     }
 
-    func handle(_ event: ScheduledEvent) {
+    func handle(_ event: ScheduledEvent, timerID: UUID? = nil) {
         guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
         let now = clock()
         guard now >= event.date else {
@@ -416,10 +420,10 @@ final class AppState: ObservableObject {
             return
         }
 
-        performScheduledWarmup(for: event)
+        performScheduledWarmup(for: event, timerID: timerID)
     }
 
-    private func performScheduledWarmup(for event: ScheduledEvent) {
+    private func performScheduledWarmup(for event: ScheduledEvent, timerID: UUID?) {
         if event.windowNumber == 1, cycle.dayKey != event.dayKey {
             cycle = engine.newCycle(startingAt: event.targetAt)
             store.saveDailyCycle(cycle)
@@ -433,22 +437,24 @@ final class AppState: ObservableObject {
 
         Task {
             defer { finishWorking() }
-            let quotaOperationID = UUID().uuidString
-            do {
-                let result = try await checkSession(
-                    targetAt: event.targetAt, event: event, context: "scheduled",
-                    operationID: quotaOperationID, deadline: engine.timing(for: event.targetAt).expiresAt
-                )
-                complete(event, quota: result.inspection.quota,
-                         status: result.status,
-                         message: result.message)
-            } catch {
-                var failureMetadata = scheduledMetadata(event)
-                failureMetadata["operation_id"] = quotaOperationID
-                failureMetadata["error_code"] = diagnosticErrorCode(error)
-                diagnosticLog("window.attempt_failed", failureMetadata)
-                updateConnectionFailure(error)
-                handleTargetFailure(error, event: event)
+            await DiagnosticContext.$scheduledTimerID.withValue(timerID?.uuidString) {
+                let quotaOperationID = UUID().uuidString
+                do {
+                    let result = try await checkSession(
+                        targetAt: event.targetAt, event: event, context: "scheduled",
+                        operationID: quotaOperationID, deadline: engine.timing(for: event.targetAt).expiresAt
+                    )
+                    complete(event, quota: result.inspection.quota,
+                             status: result.status,
+                             message: result.message)
+                } catch {
+                    var failureMetadata = scheduledMetadata(event)
+                    failureMetadata["operation_id"] = quotaOperationID
+                    failureMetadata["error_code"] = diagnosticErrorCode(error)
+                    diagnosticLog("window.attempt_failed", failureMetadata)
+                    updateConnectionFailure(error)
+                    handleTargetFailure(error, event: event)
+                }
             }
         }
     }
@@ -697,6 +703,7 @@ final class AppState: ObservableObject {
         record(finalStatus, message: finalMessage)
         store.saveDailyCycle(cycle)
         diagnosticLogCritical("window.unresolved", [
+            "timer_id": DiagnosticContext.scheduledTimerID ?? "none",
             "target_at": diagnosticDate(targetAt),
             "window": "\(windowNumber)",
             "outcome": String(describing: finalStatus),
@@ -713,12 +720,14 @@ final class AppState: ObservableObject {
     }
 
     private func scheduledMetadata(_ event: ScheduledEvent) -> [String: String] {
-        [
+        var metadata = [
             "day_key": event.dayKey,
             "window": "\(event.windowNumber)",
             "target_at": diagnosticDate(event.targetAt),
             "event_at": diagnosticDate(event.date)
         ]
+        metadata["timer_id"] = DiagnosticContext.scheduledTimerID
+        return metadata
     }
 
     static func isQuotaCacheFresh(_ cache: QuotaCache, at now: Date) -> Bool {

@@ -4,6 +4,7 @@ import os
 
 enum DiagnosticContext {
     @TaskLocal static var operationID: String?
+    @TaskLocal static var scheduledTimerID: String?
 }
 
 final class DiagnosticLogger: @unchecked Sendable {

@@ -63,9 +63,12 @@
 ### TC-OS-001 — 잠금 지원과 sleep no-catch-up (P0, Integration+macOS)
 
 - 참조: `REQ-011`; `FLOW-009`, `FLOW-010`
-- 실행: (a) system sleep을 막고 화면만 잠근 상태에서 예약을 확인한다. (b) 정시 시도 없이 T+3분 이후 복귀를 재현한다.
-- 기대: (a)는 예약과 결과 기록이 정상 동작한다. (b)는 `놓침`과 fallback을 기록하고 PTY를 실행하지 않는다.
-- 증거: 잠금 상태 최근 결과와 (b)의 복귀 후 spawn-count=0. 실제 sleep·덮개·종료·로그아웃 동작 보장은 테스트하지 않는다.
+- 실행: (a) system sleep을 막고 화면만 잠근 상태에서 예약을 확인한다. (b) 정시 시도 없이 T+3분 이후 복귀한다. (c) 예약 등록 뒤 실제 시스템 잠자기를 거쳐 T 전에 복귀한다. 여러 번 잠드는 경우와 주말을 넘기는 예약도 확인한다.
+- 기대: (a)는 예약과 결과 기록이 정상 동작한다. (b)는 `놓침`과 fallback을 기록하고 PTY를 실행하지 않는다. (c)는 잠든 시간을 더하지 않고 원래 T에 처리한다.
+- 증거: 같은 예약 식별자의 등록·콜백·MainActor 처리 기록, 실제 sleep/wake 기록, (b)의 복귀 후 spawn-count=0. 시스템 잠자기 자체나 앱 종료 중 실행은 보장하지 않는다.
+- 자동 회귀: `SchedulerRecoveryTests`에서 실제 시각 변경, 5초·3분 경계, 재시도 시각 보존, 설정 교체, 실행 중 복귀, 조회 중 마감 경과의 추가 전송 차단을 검증한다. `WallClockTimerTests`에서 실제 큐 콜백, 취소·해제, observer 연결·해제를 검증한다.
+- 실기기 도구: `bash scripts/verify-scheduler.sh before 180`, `multiple 300`, `after 60`. Claude·Keychain 접근 없이 앱과 동일한 AppState·WallClockTimer를 빌드하고 격리된 설정으로 실행한다. 사용자가 실제 잠자기·복귀하며, 잠자기 이벤트가 없으면 합격하지 않는다. `awake 5`는 잠자기 없는 기본 동작 확인만 한다.
+- `timer.callback`은 백그라운드 콜백 진입, `timer.fired`는 MainActor 처리 진입이다. `timer_id`, `callback_at`, `fired_at`, `delivery_delay_ms`로 전달 구간을 구별한다. `schedule.reconciled`는 복귀·시각 변경 전후 목표를 기록한다.
 
 ### TC-AUTH-001 — direct browser OAuth PKCE·managed Keychain (P0, Integration+macOS)
 

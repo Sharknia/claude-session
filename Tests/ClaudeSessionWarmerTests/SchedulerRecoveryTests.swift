@@ -190,6 +190,23 @@ final class SchedulerRecoveryTests: XCTestCase {
         XCTAssertEqual(count, 1)
     }
 
+    func testSettingsChangeDuringTransientFailureKeepsStillEligibleRetryDate() async throws {
+        let f = Fixture(hold: true, error: .quotaUnavailable)
+        defer { f.cleanup() }
+        let state = f.makeState()
+        state.handle(f.event)
+        try await waitForInspection(f.backend)
+        XCTAssertTrue(state.applySettings(firstWarmupDate: f.target, weekdays: [2, 3, 4, 5, 6],
+                                          excludeKoreanHolidays: true, launchAtLogin: false))
+        state.reconcileSchedule(reason: "system_wake")
+        await f.backend.release()
+        try await finish(state)
+        XCTAssertEqual(state.nextEvent?.date, f.target.addingTimeInterval(30))
+        XCTAssertEqual(state.nextEvent?.targetAt, f.target)
+        XCTAssertEqual(state.cycle.handledWindows, 0)
+        XCTAssertNotNil(state.cycle.firstFailure)
+    }
+
     private func finish(_ state: AppState) async throws {
         for _ in 0..<100 {
             if !state.isWorking { return }
