@@ -18,6 +18,7 @@ enum MenuDateFormatting {
 
 struct MenuContent: View {
     @ObservedObject var state: AppState
+    @ObservedObject var updater: AppUpdater
     @State private var draftTime: Date
     @State private var draftWeekdays: Set<Int>
     @State private var draftExcludeHolidays: Bool
@@ -28,8 +29,9 @@ struct MenuContent: View {
         (1, "일"), (2, "월"), (3, "화"), (4, "수"), (5, "목"), (6, "금"), (7, "토")
     ]
 
-    init(state: AppState) {
+    init(state: AppState, updater: AppUpdater) {
         self.state = state
+        self.updater = updater
         _draftTime = State(initialValue: state.firstWarmupDate)
         _draftWeekdays = State(initialValue: state.settings.weekdays)
         _draftExcludeHolidays = State(initialValue: state.settings.excludeKoreanHolidays)
@@ -233,7 +235,14 @@ struct MenuContent: View {
             }
 
             HStack {
+                Text(appVersionLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
+                Button("업데이트 확인") { updater.checkForUpdates() }
+                    .buttonStyle(.plain)
+                    .disabled(!updater.canCheckForUpdates)
+                    .help("새 버전 설치를 선택하면 다운로드 후 앱이 다시 시작됩니다.")
                 Button("종료") {
                     NSApplication.shared.terminate(nil)
                 }
@@ -241,6 +250,14 @@ struct MenuContent: View {
                 .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var appVersionLabel: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
+            return "개발 빌드"
+        }
+        return "v\(version) (빌드 \(build))"
     }
 
     private var hasDraftChanges: Bool {

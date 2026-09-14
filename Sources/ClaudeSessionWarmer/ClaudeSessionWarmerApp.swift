@@ -3,7 +3,14 @@ import SwiftUI
 
 @main
 struct ClaudeSessionWarmerApp: App {
-    @StateObject private var state = AppState()
+    @StateObject private var state: AppState
+    @StateObject private var updater: AppUpdater
+
+    init() {
+        let state = AppState()
+        _state = StateObject(wrappedValue: state)
+        _updater = StateObject(wrappedValue: AppUpdater(state: state))
+    }
 
     private var menuBarIcon: NSImage {
         if let url = Bundle.main.url(forResource: "MenuBarTemplate", withExtension: "pdf"),
@@ -20,7 +27,7 @@ struct ClaudeSessionWarmerApp: App {
 
     var body: some Scene {
         MenuBarExtra {
-            MenuContent(state: state)
+            MenuContent(state: state, updater: updater)
         } label: {
             Image(nsImage: menuBarIcon)
                 .accessibilityLabel("Claude Session Warmer")

@@ -42,14 +42,16 @@ echo "[1/5] SwiftPM release 빌드"
 swift build --package-path "$PROJECT_DIR" --configuration release
 readonly BIN_DIR="$(swift build --package-path "$PROJECT_DIR" --configuration release --show-bin-path)"
 readonly BUILT_EXECUTABLE="$BIN_DIR/$APP_NAME"
+readonly SPARKLE_SOURCE="$PROJECT_DIR/.build/artifacts/sparkle/Sparkle/Sparkle.xcframework/macos-arm64_x86_64/Sparkle.framework"
 
-if [[ ! -x "$BUILT_EXECUTABLE" ]]; then
-    echo "오류: 릴리스 실행 파일을 찾을 수 없습니다: $BUILT_EXECUTABLE" >&2
+if [[ ! -x "$BUILT_EXECUTABLE" || ! -d "$SPARKLE_SOURCE" ]]; then
+    echo "오류: 릴리스 실행 파일 또는 Sparkle 프레임워크가 없습니다." >&2
     exit 1
 fi
 
 echo "[2/5] 앱 번들 생성"
-mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources" "$APP_BUNDLE/Contents/Frameworks"
+ditto "$SPARKLE_SOURCE" "$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
 cp "$INFO_PLIST_SOURCE" "$APP_BUNDLE/Contents/Info.plist"
 cp "$BUILT_EXECUTABLE" "$APP_EXECUTABLE"
 cp "$APP_ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/AppIcon.icns"
@@ -57,6 +59,17 @@ cp "$MENU_BAR_ICON_SOURCE" "$APP_BUNDLE/Contents/Resources/MenuBarTemplate.pdf"
 chmod 755 "$APP_EXECUTABLE"
 
 echo "[3/5] Developer ID 서명: $CODESIGN_IDENTITY"
+# Sparkle의 식별자·entitlements를 유지하고 내부 실행 파일부터 바깥으로 서명한다.
+readonly SPARKLE_EMBEDDED="$APP_BUNDLE/Contents/Frameworks/Sparkle.framework"
+for component in \
+    "$SPARKLE_EMBEDDED/Versions/B/XPCServices/Downloader.xpc" \
+    "$SPARKLE_EMBEDDED/Versions/B/XPCServices/Installer.xpc" \
+    "$SPARKLE_EMBEDDED/Versions/B/Autoupdate" \
+    "$SPARKLE_EMBEDDED/Versions/B/Updater.app" \
+    "$SPARKLE_EMBEDDED"; do
+    codesign --force --options runtime --timestamp --preserve-metadata=entitlements \
+        --sign "$CODESIGN_IDENTITY" "$component"
+done
 # 같은 Bundle ID·Team ID·Developer ID 인증서 종류를 업데이트 간 유지한다.
 for target in "$APP_EXECUTABLE" "$APP_BUNDLE"; do
     codesign --force --options runtime --timestamp \
@@ -111,6 +124,7 @@ else
 fi
 
 if [[ "$RELEASE_BUILD" == "1" ]]; then
+    bash "$SCRIPT_DIR/generate-appcast.sh" "$DMG_PATH"
     echo "배포용 서명·공증 DMG 완료: $DMG_PATH"
 else
     echo "내부 검증용 Developer ID 서명 DMG 완료: $DMG_PATH"
