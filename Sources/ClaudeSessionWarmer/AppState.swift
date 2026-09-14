@@ -32,7 +32,8 @@ final class AppState: ObservableObject {
     private let inspectClaude: @Sendable (String) async throws -> Inspection
     private let warmClaude: @Sendable (URL, String) async throws -> Void
     private let lifecycleMonitor = LifecycleMonitor()
-    private var timer: Timer?
+    private var timer: WallClockTimer?
+    private(set) var scheduledTimerID: UUID?
     private var startedTargetsThisRun: Set<Date> = []
     private var isSilentRefreshRunning = false
     private var lastSilentRefreshAt: Date?
@@ -259,7 +260,7 @@ final class AppState: ObservableObject {
 
     private func scheduleNext(after date: Date? = nil) {
         let now = date ?? clock()
-        timer?.invalidate()
+        cancelScheduledTimer()
         reconcileMissedWindows(at: now)
         nextEvent = engine.nextEvent(after: now, settings: settings, cycle: cycle)
         guard let event = nextEvent else {
@@ -279,34 +280,70 @@ final class AppState: ObservableObject {
         arm(event, at: event.date)
     }
 
-    private func arm(_ event: ScheduledEvent, at date: Date) {
-        guard schedulerEnabled else { return }
-        timer?.invalidate()
-        let delay = max(0.05, date.timeIntervalSinceNow)
-        var metadata = scheduledMetadata(event)
+    func arm(_ event: ScheduledEvent, at date: Date, reason: String = "scheduled") {
+        cancelScheduledTimer()
+        let id = UUID()
+        scheduledTimerID = id
+        let armedEvent = ScheduledEvent(
+            date: date, targetAt: event.targetAt, dayKey: event.dayKey, windowNumber: event.windowNumber
+        )
+        nextEvent = armedEvent
+        var metadata = scheduledMetadata(armedEvent)
+        metadata["timer_id"] = id.uuidString
+        metadata["clock"] = "wall"
+        metadata["reason"] = reason
         metadata["armed_for"] = diagnosticDate(date)
-        metadata["delay_ms"] = "\(Int(delay * 1_000))"
+        metadata["delay_ms"] = "\(Int(max(0, date.timeIntervalSince(clock())) * 1_000))"
         diagnosticLog("timer.armed", metadata)
-        timer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { [weak self] _ in
-            Task { @MainActor in
-                let firedAt = Date()
-                var firedMetadata = self?.scheduledMetadata(event) ?? [:]
-                firedMetadata["fired_at"] = diagnosticDate(firedAt)
-                firedMetadata["drift_ms"] = "\(Int(firedAt.timeIntervalSince(date) * 1_000))"
-                firedMetadata["was_working"] = self?.isWorking == true ? "true" : "false"
-                diagnosticLogCritical("timer.fired", firedMetadata)
-                self?.handle(event)
+        guard schedulerEnabled else { return }
+        let armedMetadata = metadata
+        timer = WallClockTimer(at: date) { [weak self] callbackAt in
+            var callbackMetadata = armedMetadata
+            callbackMetadata["callback_at"] = diagnosticDate(callbackAt)
+            callbackMetadata["drift_ms"] = "\(Int(callbackAt.timeIntervalSince(date) * 1_000))"
+            DiagnosticLogger.shared.log(event: "timer.callback", metadata: callbackMetadata, at: callbackAt)
+            Task { @MainActor [weak self] in
+                self?.receiveTimerCallback(armedEvent, id: id, callbackAt: callbackAt)
             }
         }
     }
 
-    func handle(_ event: ScheduledEvent) {
-        guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
-        guard !isWorking else {
-            arm(event, at: Date().addingTimeInterval(5))
+    private func cancelScheduledTimer() {
+        scheduledTimerID = nil
+        timer?.cancel()
+        timer = nil
+    }
+
+    func receiveTimerCallback(_ event: ScheduledEvent, id: UUID, callbackAt: Date) {
+        let receivedAt = Date()
+        var metadata = scheduledMetadata(event)
+        metadata["timer_id"] = id.uuidString
+        metadata["callback_at"] = diagnosticDate(callbackAt)
+        metadata["fired_at"] = diagnosticDate(receivedAt)
+        metadata["delivery_delay_ms"] = "\(Int(receivedAt.timeIntervalSince(callbackAt) * 1_000))"
+        metadata["drift_ms"] = "\(Int(receivedAt.timeIntervalSince(event.date) * 1_000))"
+        guard scheduledTimerID == id else {
+            metadata["reason"] = "replaced_or_cancelled"
+            diagnosticLog("timer.ignored", metadata)
             return
         }
+        cancelScheduledTimer()
+        metadata["was_working"] = isWorking ? "true" : "false"
+        DiagnosticLogger.shared.logAndFlush(event: "timer.fired", metadata: metadata, at: receivedAt)
+        handle(event)
+    }
+
+    func handle(_ event: ScheduledEvent) {
+        guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
         let now = clock()
+        guard now >= event.date else {
+            arm(event, at: event.date, reason: "early_callback")
+            return
+        }
+        guard !isWorking else {
+            arm(event, at: now.addingTimeInterval(5), reason: "working")
+            return
+        }
         if engine.position(of: event.targetAt, at: now) == .missed {
             closeMissed(event)
             return
