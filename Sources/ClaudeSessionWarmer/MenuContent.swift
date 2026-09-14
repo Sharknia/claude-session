@@ -233,6 +233,9 @@ struct MenuContent: View {
             }
 
             HStack {
+                Text(appVersionLabel)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Spacer()
                 Button("종료") {
                     NSApplication.shared.terminate(nil)
@@ -241,6 +244,14 @@ struct MenuContent: View {
                 .foregroundStyle(.secondary)
             }
         }
+    }
+
+    private var appVersionLabel: String {
+        guard let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String,
+              let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String else {
+            return "개발 빌드"
+        }
+        return "v\(version) (빌드 \(build))"
     }
 
     private var hasDraftChanges: Bool {
