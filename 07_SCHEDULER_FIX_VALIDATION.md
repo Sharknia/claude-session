@@ -4,6 +4,8 @@
 
 상태: 구현·자동 테스트·기본 타이머 검증·서명·공증·설치 완료. 오늘·내일 이후 실사용 예약 관찰 중.
 
+최신 설치본 변경: 사용자 요청으로 버전 표시를 추가한 0.1.5 빌드 7을 로컬 설치했다. 아래 0.1.4의 공증 결과는 이 새 빌드에 적용되지 않는다. 0.1.5는 기존 Developer ID로 서명됐지만 공증 프로필을 읽을 수 없어 공증 미완료 상태다.
+
 ## 코드와 작업 브랜치
 
 - 기준: 최신 `origin/main`의 `fe1a3c6431004b31fdff4210a86874c76a1fed2b`에서 분기
@@ -85,3 +87,18 @@ bash /Users/crobat/dev/claude-session/scripts/verify-scheduler.sh after 60
 - GitHub 릴리스 게시 및 main 병합은 수행하지 않음
 
 검증 로그 위치는 프로그램 시작 시 출력한다. 기본 타이머 검증 사본은 [awake-70954.jsonl](/Users/crobat/dev/claude-session/.build/scheduler-verification/evidence/awake-70954.jsonl), 자동 테스트 결과는 [scheduler-tests.log](/Users/crobat/dev/claude-session/.build/scheduler-tests.log), 패키징 결과는 [scheduler-packaging.log](/Users/crobat/dev/claude-session/.build/scheduler-packaging.log)에 보존한다.
+
+## 버전 표시 추가와 최신 설치본
+
+- 사용자 요청: Claude Session Warmer 화면에 현재 버전 표시
+- 코드 커밋: `698fccf`, release 빌드 통과 및 원격 푸시 완료
+- 메뉴 하단 왼쪽에 Bundle의 실제 버전·빌드를 읽어 `v0.1.5 (빌드 7)` 형식으로 표시
+- 새 설치본: 0.1.5 빌드 7, PID 20937, launch `08582A9B-38D5-44CA-9247-215E85FDAA29`
+- 설치 실행 파일 SHA-256: `5f9dd43dd4318d74ab78aaaa517235ac84190f501328790cd2e5528c78838bce`
+- 기존 0.1.4 설치본 백업: [installed-0.1.4.app](/Users/crobat/dev/claude-session/.build/scheduler-release-backup.nc2Ano/installed-0.1.4.app)
+- 기존 Developer ID 서명 및 지정 요구사항 검증 통과. `claude-session-notary` 프로필이 현재 검색되지 않아 공증은 미완료
+- 로컬 패키지: [ClaudeSessionWarmer-0.1.5-dev.dmg](/Users/crobat/dev/claude-session/dist/ClaudeSessionWarmer-0.1.5-dev.dmg), 공개 릴리스 아님
+- 설치 버전과 프로세스는 확인했으나 화면 확인 도구가 앱 접근 시간 초과를 반환해 실제 화면의 시각적 확인은 미실시
+- 실사용 로그 모니터는 이 새 설치본의 launch를 따라가도록 갱신
+
+0.1.4는 외부 공개 전이었으므로 버전 표시 추가 시 패치 버전을 올리는 것은 필수가 아니었다. 0.1.5는 이 작업에서 설치본을 구분하기 위해 선택한 번호다.
