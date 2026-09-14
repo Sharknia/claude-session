@@ -18,6 +18,7 @@ enum MenuDateFormatting {
 
 struct MenuContent: View {
     @ObservedObject var state: AppState
+    @ObservedObject var updater: AppUpdater
     @State private var draftTime: Date
     @State private var draftWeekdays: Set<Int>
     @State private var draftExcludeHolidays: Bool
@@ -28,8 +29,9 @@ struct MenuContent: View {
         (1, "일"), (2, "월"), (3, "화"), (4, "수"), (5, "목"), (6, "금"), (7, "토")
     ]
 
-    init(state: AppState) {
+    init(state: AppState, updater: AppUpdater) {
         self.state = state
+        self.updater = updater
         _draftTime = State(initialValue: state.firstWarmupDate)
         _draftWeekdays = State(initialValue: state.settings.weekdays)
         _draftExcludeHolidays = State(initialValue: state.settings.excludeKoreanHolidays)
@@ -237,6 +239,9 @@ struct MenuContent: View {
                     .font(.caption)
                     .foregroundStyle(.secondary)
                 Spacer()
+                Button("업데이트 확인") { updater.checkForUpdates() }
+                    .buttonStyle(.plain)
+                    .disabled(!updater.canCheckForUpdates)
                 Button("종료") {
                     NSApplication.shared.terminate(nil)
                 }
