@@ -4,7 +4,7 @@
 
 상태: 구현·자동 테스트·기본 타이머 검증·서명·공증·설치 완료. 오늘·내일 이후 실사용 예약 관찰 중.
 
-최신 설치본 변경: 사용자 지시에 따라 제품 버전을 0.1.4로 고정했다. 버전 표시·원클릭 업데이트를 포함한 현재 설치본은 0.1.4 빌드 9다. 아래 빌드 6의 공증 결과는 이 새 빌드에 적용되지 않는다. 최신 빌드는 기존 Developer ID로 서명됐지만 공증 프로필 접근이 일시적으로 실패해 최종 공증은 대기 중이다.
+최신 설치본 변경: 사용자 지시에 따라 제품 버전을 0.1.4로 고정했다. 버전 표시·원클릭 업데이트를 포함한 현재 설치본은 0.1.4 빌드 9다. 공증 프로필 접근이 복구돼 빌드 9의 별도 공증·stapling과 설치 앱의 Gatekeeper 검증을 완료했다. 아래 빌드 6 결과는 과거 검증 기록이다.
 
 ## 코드와 작업 브랜치
 
@@ -72,7 +72,7 @@ bash /Users/crobat/dev/claude-session/scripts/verify-scheduler.sh after 60
 - 2026-09-14 11:21:29 KST에 0.1.4/빌드 6으로 설치본 교체 및 실행
 - 기존 배포용 앱 백업: [ClaudeSessionWarmer-0.1.3.app](/Users/crobat/dev/claude-session/.build/scheduler-release-backup.nc2Ano/ClaudeSessionWarmer-0.1.3.app)
 - 기존 0.1.3 DMG 보존: [ClaudeSessionWarmer-0.1.3.dmg](/Users/crobat/dev/claude-session/dist/ClaudeSessionWarmer-0.1.3.dmg)
-- 새 후보: [ClaudeSessionWarmer-0.1.4.dmg](/Users/crobat/dev/claude-session/dist/ClaudeSessionWarmer-0.1.4.dmg)
+- 당시 후보 보존본: [ClaudeSessionWarmer-0.1.4-build6.dmg](/Users/crobat/dev/claude-session/.build/scheduler-release-backup.nc2Ano/ClaudeSessionWarmer-0.1.4-build6.dmg)
 - 앱·DMG 모두 Developer ID 서명 검증, 공증 `Accepted`, stapler validate, Gatekeeper `accepted` 통과
 - Team ID: `V9SQZ6B7RP`, Bundle ID: `com.sharknia.ClaudeSessionWarmer` 유지
 - 앱 공증 ID: `0915e195-6b9b-4830-b49b-c80ca17fc598`
@@ -88,7 +88,7 @@ bash /Users/crobat/dev/claude-session/scripts/verify-scheduler.sh after 60
 
 검증 로그 위치는 프로그램 시작 시 출력한다. 기본 타이머 검증 사본은 [awake-70954.jsonl](/Users/crobat/dev/claude-session/.build/scheduler-verification/evidence/awake-70954.jsonl), 자동 테스트 결과는 [scheduler-tests.log](/Users/crobat/dev/claude-session/.build/scheduler-tests.log), 패키징 결과는 [scheduler-packaging.log](/Users/crobat/dev/claude-session/.build/scheduler-packaging.log)에 보존한다.
 
-## 버전 표시 추가와 최신 설치본
+## 버전 표시 추가 당시 기록: 0.1.5 (현재 미사용)
 
 - 사용자 요청: Claude Session Warmer 화면에 현재 버전 표시
 - 코드 커밋: `698fccf`, release 빌드 통과 및 원격 푸시 완료
@@ -114,4 +114,15 @@ bash /Users/crobat/dev/claude-session/scripts/verify-scheduler.sh after 60
 - 예약 식별자: `05B5363F-893B-4870-B4D6-D53954540AED`, 시간 기준 `wall`
 - `update.check_availability`가 true로 바뀌어 업데이트 확인 가능한 상태 확인
 - 업데이트 상세 검증과 공개 피드 연결은 08 문서에 기록
-- 빌드 9는 Developer ID 서명 검증을 통과한 로컬 설치본이다. 이전 빌드의 공증 완료와 구분한다.
+- 빌드 9는 Developer ID 서명 검증과 아래 별도 공증을 완료했다.
+
+### 빌드 9 공증 및 실제 업데이트 확인
+
+- 앱 공증 ID: `5d2ee0e5-f5c4-492e-b5dd-560a11fc3973`, 결과 `Accepted`
+- DMG 공증 ID: `5d71b3d9-f881-4965-8ede-c09f6a7cba90`, 결과 `Accepted`
+- [빌드 9 배포 후보 DMG](/Users/crobat/dev/claude-session/dist/ClaudeSessionWarmer-0.1.4.dmg) SHA-256: `89b35a22a48ad53aba05efd9289785c12b3189cd14e883e11dded7593289b464`
+- 새 appcast.xml SHA-256: `728ea99bc75487e6b218bf9328b92f2f2d295c88a40ccddcc1032a644d889c5f`, 서명 검증 통과. 아직 공개 0.1.4 릴리스에 게시하지 않았다.
+- 공증된 앱과 실행 중인 설치 앱의 CDHash는 모두 `51a5c3378efd5259b03522a12eb651dff3d3b5b8`로 일치했다. 재서명 시각 때문에 전체 실행 파일 SHA-256은 다르므로 같은 값이라고 취급하지 않는다.
+- 설치 앱에 직접 공증 티켓을 부착한 후 `stapler validate`, `spctl --assess --type execute`, `codesign --verify --deep --strict` 통과. 앱 재시작 없이 PID 64588과 기존 예약 유지.
+- 실제 설치 앱에서 12:55:45.850 업데이트 확인 요청, 12:55:46.608 최신 상태 응답 확인. 이후 Sparkle의 오류 코드 1001은 새 업데이트 없음에 따른 정상 종료이며 설치 실패가 아니다.
+- 근거: [공증 패키징 로그](/Users/crobat/dev/claude-session/.build/updater-notarized-packaging.log), 해당 launch의 sequence 11~15. 예약 워밍 실행 성공과는 별개 증거다.
