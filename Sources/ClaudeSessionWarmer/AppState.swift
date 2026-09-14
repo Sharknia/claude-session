@@ -31,9 +31,11 @@ final class AppState: ObservableObject {
     private let confirmationSleep: @Sendable (Duration) async throws -> Void
     private let inspectClaude: @Sendable (String) async throws -> Inspection
     private let warmClaude: @Sendable (URL, String) async throws -> Void
-    private let lifecycleMonitor = LifecycleMonitor()
+    private var lifecycleMonitor: LifecycleMonitor?
     private var timer: WallClockTimer?
     private(set) var scheduledTimerID: UUID?
+    private var needsFreshSchedule = false
+    private var pendingScheduleReasons: Set<String> = []
     private var startedTargetsThisRun: Set<Date> = []
     private var isSilentRefreshRunning = false
     private var lastSilentRefreshAt: Date?
@@ -77,6 +79,11 @@ final class AppState: ObservableObject {
         ])
 
         if startScheduler {
+            lifecycleMonitor = LifecycleMonitor { [weak self] reason in
+                Task { @MainActor [weak self] in
+                    self?.reconcileSchedule(reason: reason)
+                }
+            }
             scheduleNext()
         }
     }
@@ -113,7 +120,7 @@ final class AppState: ObservableObject {
         settings.excludeKoreanHolidays = excludeKoreanHolidays
         applyLaunchAtLogin(launchAtLogin)
         store.saveSettings(settings)
-        scheduleNext()
+        scheduleNext(reason: "settings_changed")
         return true
     }
 
@@ -149,6 +156,7 @@ final class AppState: ObservableObject {
         connectionState = .checking
 
         Task {
+            defer { finishWorking() }
             do {
                 let inspection = try await Self.loginManagedClaude()
                 cacheQuota(inspection.quota)
@@ -161,7 +169,6 @@ final class AppState: ObservableObject {
                 record(.failed, message: error.localizedDescription)
                 store.saveDailyCycle(cycle)
             }
-            isWorking = false
         }
     }
 
@@ -219,6 +226,7 @@ final class AppState: ObservableObject {
         status = .checking
         statusMessage = "세션 상태를 확인하고 있습니다."
         Task {
+            defer { isManualWarmupRunning = false }
             do {
                 let event = belongsToActiveCycle ? ScheduledEvent(
                     date: now, targetAt: expectedReset!, dayKey: engine.dayKey(for: now),
@@ -237,16 +245,17 @@ final class AppState: ObservableObject {
                     cycle.firstFailure = nil
                 }
                 // 놓친 예약 정리 뒤 수동 동작의 최종 결과를 표시한다.
-                scheduleNext()
+                needsFreshSchedule = true
+                pendingScheduleReasons.insert("manual_completed")
+                finishWorking()
                 record(result.status, message: result.message)
                 store.saveDailyCycle(cycle)
             } catch {
                 updateConnectionFailure(error)
+                finishWorking()
                 record(.failed, message: "수동 워밍 실패: \(error.localizedDescription)")
                 store.saveDailyCycle(cycle)
             }
-            isWorking = false
-            isManualWarmupRunning = false
         }
     }
 
@@ -258,7 +267,13 @@ final class AppState: ObservableObject {
         }
     }
 
-    private func scheduleNext(after date: Date? = nil) {
+    private func scheduleNext(after date: Date? = nil, reason: String = "next_window") {
+        guard !isWorking else {
+            needsFreshSchedule = true
+            pendingScheduleReasons.insert(reason)
+            cancelScheduledTimer()
+            return
+        }
         let now = date ?? clock()
         cancelScheduledTimer()
         reconcileMissedWindows(at: now)
@@ -277,7 +292,53 @@ final class AppState: ObservableObject {
         metadata["source"] = event.windowNumber == 1 ? "first" : "reset_or_fallback"
         metadata["handled_windows"] = "\(cycle.handledWindows)"
         diagnosticLog("schedule.selected", metadata)
-        arm(event, at: event.date)
+        arm(event, at: event.date, reason: reason)
+    }
+
+    /// 복귀 시 남은 시간을 다시 계산하되, 유효한 재시도 시각은 앞당기지 않는다.
+    func reconcileSchedule(reason: String) {
+        pendingScheduleReasons.insert(reason)
+        cancelScheduledTimer()
+        guard !isWorking else { return }
+        reconcilePendingSchedule()
+    }
+
+    private func finishWorking() {
+        isWorking = false
+        if needsFreshSchedule || !pendingScheduleReasons.isEmpty {
+            reconcilePendingSchedule()
+        }
+    }
+
+    private func reconcilePendingSchedule() {
+        let now = clock()
+        let previous = nextEvent
+        let reason = pendingScheduleReasons.sorted().joined(separator: ",")
+        let mustSelectFresh = needsFreshSchedule
+        pendingScheduleReasons.removeAll()
+        needsFreshSchedule = false
+
+        let candidate = engine.nextEvent(after: now, settings: settings, cycle: cycle)
+        if !mustSelectFresh, let previous,
+           engine.position(of: previous.targetAt, at: now) == .missed,
+           !(cycle.dayKey == previous.dayKey && cycle.handledWindows >= previous.windowNumber) {
+            closeMissed(previous)
+        } else if !mustSelectFresh, let previous,
+           candidate?.targetAt == previous.targetAt,
+           candidate?.windowNumber == previous.windowNumber,
+           candidate?.dayKey == previous.dayKey {
+            arm(previous, at: max(now, previous.date), reason: reason)
+        } else {
+            scheduleNext(after: now, reason: reason)
+        }
+        diagnosticLog("schedule.reconciled", [
+            "reason": reason,
+            "previous_target_at": diagnosticDate(previous?.targetAt),
+            "previous_event_at": diagnosticDate(previous?.date),
+            "next_target_at": diagnosticDate(nextEvent?.targetAt),
+            "next_event_at": diagnosticDate(nextEvent?.date),
+            "timer_id": scheduledTimerID?.uuidString ?? "none"
+        ])
     }
 
     func arm(_ event: ScheduledEvent, at date: Date, reason: String = "scheduled") {
@@ -371,6 +432,7 @@ final class AppState: ObservableObject {
         statusMessage = "\(event.windowNumber)번째 창 확인 중"
 
         Task {
+            defer { finishWorking() }
             let quotaOperationID = UUID().uuidString
             do {
                 let result = try await checkSession(
@@ -388,7 +450,6 @@ final class AppState: ObservableObject {
                 updateConnectionFailure(error)
                 handleTargetFailure(error, event: event)
             }
-            isWorking = false
         }
     }
 
@@ -405,6 +466,8 @@ final class AppState: ObservableObject {
             return SessionCheckResult(inspection: initial, performedWarmup: false)
         }
         guard !initial.quota.active else { throw AppStateError.quotaNotReset }
+        // 조회 도중 잠자기·시각 변경으로 마감을 넘겼다면 새 메시지를 전송하지 않는다.
+        if let deadline, clock() > deadline { throw AppStateError.quotaNotActivated }
 
         let suppressed = shouldSuppressWarmup(for: targetAt, at: clock())
         var warmupError: Error?
@@ -440,6 +503,7 @@ final class AppState: ObservableObject {
         for seconds in [5, 10, 15, 15, 15] {
             if clock().addingTimeInterval(Double(seconds)) > confirmationDeadline { break }
             try await confirmationSleep(.seconds(seconds))
+            if clock() > confirmationDeadline { break }
             let inspection: Inspection
             do {
                 inspection = try await inspectClaude(operationID)

@@ -196,7 +196,7 @@ final class LifecycleMonitor {
     private var applicationObservers: [NSObjectProtocol] = []
     private let heartbeat = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
 
-    init() {
+    init(onScheduleChange: @escaping @Sendable (String) -> Void = { _ in }) {
         let workspaceCenter = NSWorkspace.shared.notificationCenter
         for (name, event, critical) in [
             (NSWorkspace.willSleepNotification, "power.system_sleep", true),
@@ -214,6 +214,9 @@ final class LifecycleMonitor {
                 } else {
                     diagnosticLog(event)
                 }
+                if name == NSWorkspace.didWakeNotification {
+                    onScheduleChange("system_wake")
+                }
             })
         }
 
@@ -230,6 +233,15 @@ final class LifecycleMonitor {
                 diagnosticLog(event)
             })
         }
+
+        applicationObservers.append(NotificationCenter.default.addObserver(
+            forName: .NSSystemClockDidChange,
+            object: nil,
+            queue: nil
+        ) { _ in
+            diagnosticLog("clock.changed")
+            onScheduleChange("clock_changed")
+        })
 
         applicationObservers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,

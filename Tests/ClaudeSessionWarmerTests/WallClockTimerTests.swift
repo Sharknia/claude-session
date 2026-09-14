@@ -1,3 +1,4 @@
+import AppKit
 import XCTest
 @testable import ClaudeSessionWarmer
 
@@ -39,5 +40,23 @@ final class WallClockTimerTests: XCTestCase {
         XCTAssertNil(weakTimer)
         await fulfillment(of: [fired], timeout: 0.3)
         withExtendedLifetime(cancelled) {}
+    }
+
+    func testLifecycleForwardsWakeAndClockChangesAndRemovesObservers() async {
+        let wake = expectation(description: "복귀 전달")
+        let change = expectation(description: "시각 변경 전달")
+        wake.assertForOverFulfill = true
+        change.assertForOverFulfill = true
+        var monitor: LifecycleMonitor? = LifecycleMonitor { reason in
+            if reason == "system_wake" { wake.fulfill() }
+            if reason == "clock_changed" { change.fulfill() }
+        }
+        XCTAssertNotNil(monitor)
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        NotificationCenter.default.post(name: .NSSystemClockDidChange, object: nil)
+        monitor = nil
+        NSWorkspace.shared.notificationCenter.post(name: NSWorkspace.didWakeNotification, object: nil)
+        NotificationCenter.default.post(name: .NSSystemClockDidChange, object: nil)
+        await fulfillment(of: [wake, change], timeout: 1)
     }
 }
