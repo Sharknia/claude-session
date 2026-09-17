@@ -74,7 +74,7 @@ private final class SchedulerSleepProbe {
         }
         print("mode=\(mode) pid=\(ProcessInfo.processInfo.processIdentifier) target_at=\(diagnosticDate(target))")
         print("log_directory=\(FileManager.default.temporaryDirectory.appendingPathComponent("ClaudeSessionWarmerTests-\(ProcessInfo.processInfo.processIdentifier)").path)")
-        print("실제 잠자기 조작은 자동 수행하지 않습니다. before/multiple은 목표 전에, after는 목표 5초 이후 복귀하세요.")
+        print("실제 잠자기 조작은 자동 수행하지 않습니다. before/multiple은 목표 전에, after는 목표 이후 복귀하세요.")
         fflush(nil)
     }
 
@@ -89,8 +89,8 @@ private final class SchedulerSleepProbe {
             let timingOK = drift.map { (0...5).contains($0) } == true
             let passed: Bool
             if mode == "after" {
-                passed = beforeSleeps > 0 && count == 0 && state.status == .missed
-                    && Date() > target.addingTimeInterval(5)
+                passed = beforeSleeps > 0 && count >= 1 && state.status == .satisfied
+                    && (drift ?? -1) >= 0
             } else {
                 let requiredSleeps = mode == "awake" ? 0 : mode == "multiple" ? 2 : 1
                 passed = beforeSleeps >= requiredSleeps && beforeWakes >= requiredSleeps

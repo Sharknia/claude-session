@@ -19,6 +19,39 @@ final class SettingsStoreTests: XCTestCase {
         super.tearDown()
     }
 
+    @MainActor
+    func testLegacyCyclePreservesCountAndOnlyClearsConfirmedTransmission() throws {
+        let target = Date(timeIntervalSince1970: 1_800_000_000)
+        for status in [WarmupStatus.succeeded, .satisfied, .failed, .checking, .missed] {
+            let legacy: [String: Any] = [
+                "dayKey": "2027-01-15", "handledWindows": 2,
+                "nextResetAt": target.addingTimeInterval(18_000).timeIntervalSinceReferenceDate,
+                "lastWarmupTargetAt": target.timeIntervalSinceReferenceDate,
+                "lastRecord": ["timestamp": target.timeIntervalSinceReferenceDate,
+                               "status": status.rawValue, "message": "legacy"]
+            ]
+            defaults.set(try JSONSerialization.data(withJSONObject: legacy), forKey: "dailyCycle")
+            let store = SettingsStore(defaults: defaults)
+            let state = AppState(store: store, startScheduler: false)
+            XCTAssertEqual(state.cycle.handledWindows, 2)
+            XCTAssertEqual(state.cycle.dayKey, "2027-01-15")
+            XCTAssertEqual(state.cycle.nextResetAt, target.addingTimeInterval(18_000))
+            XCTAssertEqual(state.hasUnconfirmedWarmup, status != .succeeded && status != .satisfied)
+        }
+    }
+
+    @MainActor
+    func testNewPendingTransmissionIsNotErasedByOlderSuccessRecord() {
+        let store = SettingsStore(defaults: defaults)
+        let target = Date()
+        store.saveDailyCycle(DailyCycle(lastWarmupTargetAt: target,
+            lastRecord: WarmupRecord(timestamp: target.addingTimeInterval(-3600), status: .succeeded, message: "previous"),
+            lastWarmupAttemptAt: target))
+        let state = AppState(store: store, startScheduler: false)
+        XCTAssertTrue(state.hasUnconfirmedWarmup)
+        XCTAssertEqual(state.cycle.lastWarmupAttemptAt, target)
+    }
+
     func testDefaultsMatchMVPPolicy() {
         let store = SettingsStore(defaults: defaults)
 

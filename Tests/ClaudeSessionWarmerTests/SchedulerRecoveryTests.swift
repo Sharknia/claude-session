@@ -64,48 +64,40 @@ final class SchedulerRecoveryTests: XCTestCase {
         }
     }
 
-    func testFirstAttemptAndRetryDeadlinesRemainDistinct() async throws {
-        for (started, offset, allowed) in [(false, 0.0, true), (false, 5.0, true),
-                                           (false, 5.001, false), (true, 180.0, true),
-                                           (true, 180.001, false)] {
-            let f = Fixture(offset: offset)
+    func testDelayedCallbacksExecuteWithoutGraceDeadline() async throws {
+        for offset in [0.0, 5.0, 5.001, 147.0, 180.001, 10_800.0] {
+            let f = Fixture(offset: offset, active: false)
             defer { f.cleanup() }
             let state = f.makeState()
-            if started { state.markScheduledWindowStarted(f.event) }
             state.handle(f.event)
             try await finish(state)
-            let count = await f.backend.inspections
-            XCTAssertEqual(count, allowed ? 1 : 0, "started=\(started), offset=\(offset)")
-            XCTAssertEqual(state.status, allowed ? .satisfied : .missed)
+            XCTAssertEqual(state.status, .succeeded, "offset=\(offset)")
             XCTAssertEqual(state.cycle.handledWindows, 1)
+            let warmups = await f.backend.warmups
+            XCTAssertEqual(warmups, 1)
         }
     }
 
-    func testWakeBeforeRetryPreservesDateAndExpiryPreservesFirstFailure() throws {
+    func testWakeBeforeRetryAndRestartPreserveBackoff() {
         let f = Fixture()
         defer { f.cleanup() }
         let state = f.makeState()
         state.markScheduledWindowStarted(f.event)
         state.handleTargetFailure(ClaudeServiceError.quotaUnavailable, event: f.event, at: f.target)
         let originalFailure = state.cycle.firstFailure
-        let retry = try XCTUnwrap(state.nextEvent)
-        XCTAssertEqual(retry.date, f.target.addingTimeInterval(30))
         f.clock.set(f.target.addingTimeInterval(20))
-        state.reconcileSchedule(reason: "system_wake")
-        XCTAssertEqual(state.nextEvent, retry)
-        f.clock.set(f.target.addingTimeInterval(35))
-        state.reconcileSchedule(reason: "system_wake")
-        XCTAssertEqual(state.nextEvent?.date, f.clock.now())
-        XCTAssertEqual(state.nextEvent?.targetAt, f.target)
+        let restarted = f.makeState()
+        restarted.reconcileSchedule(reason: "system_wake")
+        XCTAssertEqual(restarted.nextEvent?.date, f.target.addingTimeInterval(30))
+        XCTAssertEqual(restarted.cycle.firstFailure, originalFailure)
         f.clock.set(f.target.addingTimeInterval(181))
-        state.reconcileSchedule(reason: "system_wake")
-        XCTAssertEqual(state.status, .failed)
-        XCTAssertEqual(state.cycle.lastRecord?.message, originalFailure?.message)
-        XCTAssertEqual(state.cycle.handledWindows, 1)
-        XCTAssertEqual(state.nextEvent?.targetAt, f.target.addingTimeInterval(18_000))
+        restarted.reconcileSchedule(reason: "system_wake")
+        XCTAssertEqual(restarted.nextEvent?.date, f.clock.now())
+        XCTAssertEqual(restarted.nextEvent?.targetAt, f.target)
+        XCTAssertEqual(restarted.cycle.handledWindows, 0)
     }
 
-    func testClockChangesAndMissedWakeKeepFallbackWithoutReopeningHandledWindow() async throws {
+    func testClockChangesKeepDueTargetAndNeverRepeatCompletedWindow() async throws {
         let f = Fixture(offset: -3600)
         defer { f.cleanup() }
         let state = f.makeState()
@@ -115,14 +107,16 @@ final class SchedulerRecoveryTests: XCTestCase {
         XCTAssertEqual(state.nextEvent?.date, f.target)
         f.clock.set(f.target.addingTimeInterval(181))
         state.reconcileSchedule(reason: "system_wake")
-        XCTAssertEqual(state.status, .missed)
+        state.handle(try XCTUnwrap(state.nextEvent))
+        try await finish(state)
+        XCTAssertEqual(state.status, .satisfied)
         XCTAssertEqual(state.cycle.handledWindows, 1)
-        XCTAssertEqual(state.nextEvent?.targetAt, f.target.addingTimeInterval(18_000))
         f.clock.set(f.target.addingTimeInterval(-60))
         state.reconcileSchedule(reason: "clock_changed")
+        state.handle(f.event)
         XCTAssertEqual(state.nextEvent?.windowNumber, 2)
         let count = await f.backend.inspections
-        XCTAssertEqual(count, 0)
+        XCTAssertEqual(count, 1)
     }
 
     func testWakeDuringScheduledAndManualWorkDefersReconciliationUntilResult() async throws {
@@ -149,7 +143,7 @@ final class SchedulerRecoveryTests: XCTestCase {
             XCTAssertEqual(state.nextEvent?.targetAt, f.target.addingTimeInterval(18_000))
             XCTAssertNotNil(state.scheduledTimerID)
             let count = await f.backend.inspections
-            XCTAssertEqual(count, 1)
+            XCTAssertEqual(count, 2)
         }
     }
 
@@ -173,7 +167,7 @@ final class SchedulerRecoveryTests: XCTestCase {
         XCTAssertEqual(state.nextEvent?.dayKey, "2026-09-15")
     }
 
-    func testSleepDuringInactiveInspectionCannotSendAfterDeadline() async throws {
+    func testSleepDuringInactiveInspectionRefreshesBeforeSending() async throws {
         let f = Fixture(hold: true, active: false)
         defer { f.cleanup() }
         let state = f.makeState()
@@ -183,11 +177,12 @@ final class SchedulerRecoveryTests: XCTestCase {
         state.reconcileSchedule(reason: "system_wake")
         await f.backend.release()
         try await finish(state)
-        XCTAssertEqual(state.status, .failed)
+        XCTAssertEqual(state.status, .succeeded)
         XCTAssertEqual(state.cycle.handledWindows, 1)
-        XCTAssertEqual(state.nextEvent?.targetAt, f.target.addingTimeInterval(18_000))
         let count = await f.backend.inspections
-        XCTAssertEqual(count, 1)
+        let warmups = await f.backend.warmups
+        XCTAssertEqual(count, 3) // 잠자기 전 응답, 재조회, 전송 후 확인
+        XCTAssertEqual(warmups, 1)
     }
 
     func testSettingsChangeDuringTransientFailureKeepsStillEligibleRetryDate() async throws {
@@ -254,7 +249,7 @@ private struct Fixture {
         let clock = clock, backend = backend
         return AppState(store: store, engine: engine, startScheduler: false, clock: { clock.now() },
                         inspectClaude: { try await backend.inspect($0) },
-                        warmClaude: { _, _ in XCTFail("활성 상태 가짜 응답에서 CLI 호출 금지") },
+                        warmClaude: { _, _ in await backend.warm() },
                         confirmationSleep: { _ in })
     }
 
@@ -273,7 +268,8 @@ private actor RecoveryBackend {
     private let reset: Date
     private let hold: Bool
     private let error: ClaudeServiceError?
-    private let active: Bool
+    private var active: Bool
+    private(set) var warmups = 0
     private var continuation: CheckedContinuation<Void, Never>?
     private(set) var inspections = 0
     var waiting: Bool { continuation != nil }
@@ -287,11 +283,13 @@ private actor RecoveryBackend {
 
     func inspect(_ id: String) async throws -> Inspection {
         inspections += 1
-        if hold { await withCheckedContinuation { continuation = $0 } }
+        if hold && inspections == 1 { await withCheckedContinuation { continuation = $0 } }
         if let error { throw error }
         return Inspection(cliURL: URL(fileURLWithPath: "/unused"),
                           quota: QuotaWindow(active: active, resetsAt: active ? reset : nil), operationID: id)
     }
+
+    func warm() { warmups += 1; active = true }
 
     func release() { continuation?.resume(); continuation = nil }
 }

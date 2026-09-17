@@ -64,13 +64,15 @@ final class ScheduleEngineTests: XCTestCase {
         XCTAssertEqual(next, date(2026, 5, 4, 6))
     }
 
-    func testWarmupWindowUsesThreeMinuteDeadline() {
-        let target = date(2026, 9, 4, 11)
-        let timing = engine.timing(for: target)
-
-        XCTAssertEqual(timing.expiresAt, date(2026, 9, 4, 11, 3))
-        XCTAssertEqual(engine.position(of: target, at: date(2026, 9, 4, 11, 3)), .actionable)
-        XCTAssertEqual(engine.position(of: target, at: date(2026, 9, 4, 11, 3, 1)), .missed)
+    func testDelayedFirstRemainsDueUntilEndOfExecutionDay() {
+        let target = date(2026, 9, 4, 6)
+        for offset in [5.001, 147, 181, 10_800, 61_200] {
+            let now = target.addingTimeInterval(offset)
+            let event = engine.nextEvent(after: now, settings: ScheduleSettings(), cycle: DailyCycle())
+            XCTAssertEqual(event?.targetAt, target)
+            XCTAssertEqual(event?.date, now)
+            XCTAssertEqual(event?.windowNumber, 1)
+        }
     }
 
     func testFirstWindowSchedulesAtTargetTime() {
@@ -93,7 +95,7 @@ final class ScheduleEngineTests: XCTestCase {
         XCTAssertEqual(justBeforeTarget?.date, date(2026, 9, 4, 9))
     }
 
-    func testFirstWindowRemainsActionableForThreeMinutes() {
+    func testDelayedFirstExecutesAtCurrentTime() {
         let settings = ScheduleSettings(firstWarmupMinutes: 9 * 60, weekdays: [6])
 
         let event = engine.nextEvent(
@@ -144,7 +146,7 @@ final class ScheduleEngineTests: XCTestCase {
         XCTAssertEqual(event?.windowNumber, 1)
     }
 
-    func testElapsedResetIsNotCaughtUp() {
+    func testElapsedResetRemainsDue() {
         let settings = ScheduleSettings(firstWarmupMinutes: 6 * 60)
         let cycle = DailyCycle(
             dayKey: "2026-09-04",
@@ -165,8 +167,9 @@ final class ScheduleEngineTests: XCTestCase {
 
         XCTAssertEqual(withinTolerance?.date, date(2026, 9, 4, 11, 2))
         XCTAssertEqual(withinTolerance?.windowNumber, 2)
-        XCTAssertEqual(missed?.targetAt, date(2026, 9, 7, 6))
-        XCTAssertEqual(missed?.windowNumber, 1)
+        XCTAssertEqual(missed?.targetAt, date(2026, 9, 4, 11))
+        XCTAssertEqual(missed?.date, date(2026, 9, 4, 11, 4))
+        XCTAssertEqual(missed?.windowNumber, 2)
     }
 
     func testPreviousDayCycleDoesNotContinueAfterMidnight() {
