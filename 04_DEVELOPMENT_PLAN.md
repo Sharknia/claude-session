@@ -1,6 +1,6 @@
 # Claude Session Warmer MVP 개발 작업 계획서
 
-> 상태: 초안
+> 상태: 기존 MVP 개발 기록. 현재 예약 정책은 [09 지연 복구 계획](09_LATE_WARMUP_RECOVERY_PLAN.md)을 따른다.
 >
 > 개발 판단: **CONDITIONAL GO**
 >
@@ -44,7 +44,7 @@ ClaudeSessionWarmer/
 ```
 
 - `AppState`: 화면 상태, 사용자 설정, 오늘 처리 횟수 관리
-- `ScheduleEngine`: 다음 실행일, 첫 시각, 실제 `resets_at`, 3분 재시도 범위 계산
+- `ScheduleEngine`: 다음 실행일, 첫 시각, 실제 `resets_at`, 지연된 당일 대상과 보존된 재시도 시각 계산
 - `ClaudeService`: direct browser OAuth PKCE, managed OAuth refresh·사용량 조회, PTY 워밍
 - `MenuContent`: 메뉴바 표시와 사용자 제어
 
@@ -54,15 +54,15 @@ ClaudeSessionWarmer/
 
 1. 사용자가 첫 워밍 시각 하나와 실행 요일을 draft로 설정하고 `저장`할 때만 예약을 갱신한다. 저장은 Claude 로그인을 시작하지 않는다.
 2. 앱에 포함한 2026~2027년 대한민국 공휴일에는 실행하지 않는다.
-3. 첫 시각 T 전에는 아무 동작도 하지 않고, T에 CLI·인증·네트워크와 활성 창을 확인한다.
+3. 첫 시각 T 전에는 자동 워밍을 기다리고, T 이후 실행 기회가 생기면 CLI·인증·네트워크와 활성 창을 확인한다.
 4. 활성 창이 없으면 PTY 최소 호출을 한 번 보내고, 이미 있으면 호출 없이 첫 창을 충족 처리한다.
-5. 실제 `five_hour.resets_at`을 다음 실행 기준으로 우선 저장하고, 없으면 실패·놓친 `targetAt + 5시간`을 fallback으로 쓴다.
+5. 실제 `five_hour.resets_at`을 다음 실행 기준으로 저장한다. 없으면 조회를 복구하고 가상 후속 시각은 만들지 않는다.
 6. 후속 예정 시각 T에 다시 확인하여 필요할 때만 워밍한다.
-7. 정시 시도 이력이 있는 오류만 T부터 +3분까지 재확인하며, 메시지 전송 가능성이 있으면 모델을 재호출하지 않는다.
-8. 첫 창과 후속 두 창, 총 3개를 처리하면 그날 종료한다.
+7. 일시 오류는 최초 시도 외 최대 3회, 30초 간격으로 재시도한다. 미확인 전송은 시간 경과만으로 재호출하지 않는다.
+8. 서로 다른 활성 창 총 3개를 확인하면 그날 종료한다. 실패·지연·중복 조회는 횟수를 늘리지 않는다.
 9. 다음 실행일의 첫 시각에 새 일일 주기를 시작한다.
 
-첫 창이 인증·refresh·네트워크 문제로 실패하거나 놓쳐도 소급 실행하지 않고 `targetAt + 5시간` fallback으로 두 번째·세 번째 창을 잇는다.
+늦게 실행돼도 오늘 필요한 작업 하나를 처리한다. 실패는 미완료로 보존하고 복구 후 다시 판단한다. 전날 예약을 소급 실행하지 않는다.
 
 ### Managed Claude OAuth
 
@@ -100,10 +100,10 @@ Claude Code는 설치 여부와 PTY 실행에만 사용한다. CLI 인증 subpro
 | ID | 작업 | 관련 요구사항 | 완료 조건 |
 |---|---|---|---|
 | TASK-001 | Xcode 메뉴바 앱과 테스트 타깃 생성 | REQ-001, REQ-013 | 메뉴바에서 실행되고 `xcodebuild test` 가능 |
-| TASK-002 | 첫 시각·요일·한국 공휴일·하루 3창 계산 | REQ-002, REQ-003, REQ-004, REQ-005, REQ-006 | 가짜 시간으로 정상일·휴일·실패 fallback 포함 3창 테스트 통과 |
+| TASK-002 | 첫 시각·요일·한국 공휴일·하루 3창 계산 | REQ-002, REQ-003, REQ-004, REQ-005, REQ-006 | 가짜 시간으로 정상일·휴일·지연 복구·하루 3창 테스트 통과 |
 | TASK-003 | direct browser OAuth PKCE와 managed OAuth 저장·refresh | REQ-008, REQ-009 | callback parser/listener, S256·state·timeout 검증, authorization-code token request, access·회전 refresh·expiry의 no-UI 갱신과 401 1회 재시도 |
 | TASK-004 | PTY 최소 워밍 실행 | REQ-007, REQ-010 | 가짜 CLI에서 1회 입력·성공·timeout·종료 검증 |
-| TASK-005 | 예약과 중복 방지 연결 | REQ-004, REQ-005, REQ-006, REQ-007, REQ-011 | 정시 이력 기반 +3분, missed fallback, 하루 3창 동작 |
+| TASK-005 | 예약과 중복 방지 연결 | REQ-004, REQ-005, REQ-006, REQ-007, REQ-011 | 당일 지연 복구, 제한 재시도, 실제 확인한 하루 3창 동작 |
 | TASK-006 | 메뉴바 설정·상태·수동 워밍·알림 | REQ-002, REQ-012 | card 구성과 저장 버튼을 포함해 사용 가능 |
 | TASK-007 | macOS 로그인 시 실행과 최근 결과 저장 | REQ-011~REQ-013 | 재실행 후 설정·처리 횟수 복원, 민감정보 미저장 |
 | TASK-008 | 통합 테스트, 라이브 검증, DMG 배포 | REQ-001~REQ-013 | P0 테스트와 라이브 게이트 통과 후 공증 DMG 설치 |
@@ -127,12 +127,12 @@ UI 시안, 자동 업데이트, 다중 제공자 구조, 복잡한 재시도 프
 
 - 선택 요일과 한국 공휴일 제외
 - 첫 창 + 후속 2개 후 종료
-- 실제 `resets_at` 우선, `targetAt + 5시간` fallback 다음 예약
+- 실제 `resets_at` 기반 다음 예약과 미완료 작업 복구
 - 활성 창이면 Claude 호출 0회
 - 동일 창 중복 호출 방지
-- +3분 이후 재시도 금지
+- 자동 추가 재시도 최대 3회와 상태 보존
 - 앱 재시작 후 처리 횟수 복원
-- 잠자기로 놓친 실행의 no-catch-up
+- 잠자기로 지연된 당일 작업의 복구
 - 예정 시각 전 잠자기·복귀에서 원래 목표 시각 유지, 취소 콜백 무시, 실행 중 재계산 병합
 - 설정 저장과 Claude 로그인 분리
 - callback parser의 method/path/code/state 검증과 listener 종료
@@ -148,7 +148,7 @@ UI 시안, 자동 업데이트, 다중 제공자 구조, 복잡한 재시도 프
 - 비활성 창 라이브 워밍
 - 실제 브라우저 callback·token exchange, Developer ID 빌드의 앱 Keychain과 화면 잠금 중 no-UI refresh
 
-월요일 진단은 `~/Library/Logs/ClaudeSessionWarmer/events.jsonl`/`events.previous.jsonl`(JSONL, 2MiB x2, 0700/0600)에 lifecycle·sleep/wake·schedule/timer drift·quota 요약(hash/size/keys/`five_hour` 형태)·결정·OAuth refresh·PTY·retry/fallback/final만 append한다. token, header, code/state/verifier, prompt/output, raw body, path는 제외한다.
+월요일 진단은 `~/Library/Logs/ClaudeSessionWarmer/events.jsonl`/`events.previous.jsonl`(JSONL, 2MiB x2, 0700/0600)에 lifecycle·sleep/wake·schedule/timer drift·quota 요약(hash/size/keys/`five_hour` 형태)·결정·OAuth refresh·PTY·retry/recovery_wait/completed만 append한다. token, header, code/state/verifier, prompt/output, raw body, path는 제외한다.
 
 ## 9. 배포 전 필수 게이트
 
@@ -171,7 +171,7 @@ UI 시안, 자동 업데이트, 다중 제공자 구조, 복잡한 재시도 프
 - 필요한 경우에만 창당 한 번의 PTY 호출을 수행한다.
 - 설정 저장과 Claude 로그인이 분리되고, 앱 단일 credential이 Claude Code 로그인 저장소와 독립적이다.
 - 공휴일과 수동 워밍이 확정 정책대로 동작한다.
-- 화면 잠금 상태에서 동작하며 실제 잠자기로 놓친 실행은 따라잡지 않는다.
+- 화면 잠금 상태에서 동작하며 실제 잠자기로 지연된 당일 작업은 복귀 후 상태를 확인해 처리한다.
 - 실패 이유와 다음 실행 시각을 메뉴바에서 확인할 수 있다.
 - 라이브 게이트와 핵심 자동화 테스트가 통과한다.
 - 서명·공증된 DMG를 내부 Mac에 설치할 수 있다.

@@ -10,7 +10,9 @@ final class ScheduledIntegrationTests: XCTestCase {
             QuotaWindow(active: false),
             QuotaWindow(active: true, resetsAt: target.addingTimeInterval(18_000)),
             QuotaWindow(active: false),
-            QuotaWindow(active: true, resetsAt: target.addingTimeInterval(36_000))
+            QuotaWindow(active: true, resetsAt: target.addingTimeInterval(36_000)),
+            QuotaWindow(active: false),
+            QuotaWindow(active: true, resetsAt: target.addingTimeInterval(54_000))
         ])
         let state = makeState(store, engine, target, backend)
         let first = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
@@ -32,9 +34,18 @@ final class ScheduledIntegrationTests: XCTestCase {
         XCTAssertEqual(store.loadDailyCycle().handledWindows, 2)
         XCTAssertEqual(restarted.nextEvent?.windowNumber, 3)
         XCTAssertEqual(restarted.nextEvent?.targetAt, target.addingTimeInterval(36_000))
+        let third = try XCTUnwrap(restarted.nextEvent)
+        let final = makeState(store, engine, third.targetAt, backend)
+        final.handle(third)
+        try await finish(final)
+        XCTAssertEqual(final.cycle.handledWindows, 3)
+        XCTAssertEqual(final.nextEvent?.dayKey, "2026-09-09")
+        final.handle(ScheduledEvent(date: third.targetAt, targetAt: third.targetAt,
+                                    dayKey: third.dayKey, windowNumber: 4))
+        XCTAssertFalse(final.isWorking)
         let counts = await backend.counts()
-        XCTAssertEqual(counts.inspections, 4)
-        XCTAssertEqual(counts.warmups, 2)
+        XCTAssertEqual(counts.inspections, 6)
+        XCTAssertEqual(counts.warmups, 3)
     }
 
     func testWarmupTimeoutThenActiveQuotaNeverResendsPrompt() async throws {

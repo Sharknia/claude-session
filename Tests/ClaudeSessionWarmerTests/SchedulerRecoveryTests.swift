@@ -202,6 +202,23 @@ final class SchedulerRecoveryTests: XCTestCase {
         XCTAssertNotNil(state.cycle.firstFailure)
     }
 
+    func testDateChangeDuringInspectionDefersToTodaysFirstWithoutSendingOldWork() async throws {
+        let f = Fixture(hold: true, active: false)
+        defer { f.cleanup() }
+        let state = f.makeState()
+        state.handle(f.event)
+        try await waitForInspection(f.backend)
+        f.clock.set(f.target.addingTimeInterval(86_400 + 3600))
+        state.reconcileSchedule(reason: "system_wake")
+        await f.backend.release()
+        try await finish(state)
+        XCTAssertEqual(state.nextEvent?.dayKey, "2026-09-15")
+        XCTAssertEqual(state.nextEvent?.targetAt, f.target.addingTimeInterval(86_400))
+        let warmups = await f.backend.warmups
+        XCTAssertEqual(warmups, 0)
+        XCTAssertEqual(state.cycle.handledWindows, 0)
+    }
+
     private func finish(_ state: AppState) async throws {
         for _ in 0..<100 {
             if !state.isWorking { return }
