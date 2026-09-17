@@ -8,9 +8,9 @@ struct VerifyScheduler {
     @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
-        guard args.count == 2, ["awake", "before", "multiple", "after"].contains(args[0]),
+        guard args.count == 2, ["awake", "late", "before", "multiple", "after"].contains(args[0]),
               let seconds = Double(args[1]), seconds.isFinite, (5...3600).contains(seconds) else {
-            print("사용법: verify-scheduler.sh <awake|before|multiple|after> <5~3600초>")
+            print("사용법: verify-scheduler.sh <awake|late|before|multiple|after> <5~3600초>")
             exit(2)
         }
         let app = NSApplication.shared
@@ -37,17 +37,17 @@ private final class SchedulerSleepProbe {
 
     init(mode: String, delay: TimeInterval) {
         self.mode = mode
-        target = Date().addingTimeInterval(delay)
+        target = Date().addingTimeInterval(mode == "late" ? -delay : delay)
         defaults = UserDefaults(suiteName: suite)!
         let store = SettingsStore(defaults: defaults)
         let engine = ScheduleEngine()
         store.saveSettings(ScheduleSettings(firstWarmupMinutes: 0, weekdays: Set(1...7), excludeKoreanHolidays: false))
         store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target), handledWindows: 1, nextResetAt: target))
-        backend = ProbeBackend(reset: target.addingTimeInterval(18_000))
+        backend = ProbeBackend(reset: target.addingTimeInterval(18_000), active: mode != "late")
         let backend = backend
         state = AppState(store: store, engine: engine,
                          inspectClaude: { await backend.inspect($0) },
-                         warmClaude: { _, _ in fatalError("검증 프로그램에서 실제 워밍 금지") },
+                         warmClaude: { _, _ in await backend.warm() },
                          confirmationSleep: { _ in })
         for name in [NSWorkspace.willSleepNotification, NSWorkspace.didWakeNotification] {
             powerObservers.append(NSWorkspace.shared.notificationCenter.addObserver(
@@ -69,12 +69,12 @@ private final class SchedulerSleepProbe {
         state.$isWorking.sink { [weak self] _ in
             Task { @MainActor [weak self] in self?.evaluate() }
         }.store(in: &observations)
-        timeout = WallClockTimer(at: target.addingTimeInterval(600)) { [weak self] _ in
+        timeout = WallClockTimer(at: Date().addingTimeInterval(mode == "late" ? 30 : delay + 600)) { [weak self] _ in
             Task { @MainActor [weak self] in self?.finish(passed: false, details: "timeout=true") }
         }
         print("mode=\(mode) pid=\(ProcessInfo.processInfo.processIdentifier) target_at=\(diagnosticDate(target))")
         print("log_directory=\(FileManager.default.temporaryDirectory.appendingPathComponent("ClaudeSessionWarmerTests-\(ProcessInfo.processInfo.processIdentifier)").path)")
-        print("실제 잠자기 조작은 자동 수행하지 않습니다. before/multiple은 목표 전에, after는 목표 5초 이후 복귀하세요.")
+        print("실제 잠자기 조작은 자동 수행하지 않습니다. before/multiple은 목표 전에, after는 목표 이후 복귀하세요.")
         fflush(nil)
     }
 
@@ -82,21 +82,24 @@ private final class SchedulerSleepProbe {
         guard !finished, !state.isWorking, state.cycle.handledWindows >= 2 else { return }
         finished = true
         Task {
-            let (count, inspectedAt) = await backend.result()
+            let (count, inspectedAt, warmups, reset) = await backend.result()
             let beforeSleeps = sleeps.filter { $0 < target }.count
             let beforeWakes = wakes.filter { $0 < target }.count
             let drift = inspectedAt?.timeIntervalSince(target)
             let timingOK = drift.map { (0...5).contains($0) } == true
             let passed: Bool
-            if mode == "after" {
-                passed = beforeSleeps > 0 && count == 0 && state.status == .missed
-                    && Date() > target.addingTimeInterval(5)
+            if mode == "late" {
+                passed = sleeps.isEmpty && count == 2 && warmups == 1 && state.status == .succeeded
+                    && (drift ?? -1) >= 0 && state.cycle.nextResetAt == reset
+            } else if mode == "after" {
+                passed = beforeSleeps > 0 && count >= 1 && state.status == .satisfied
+                    && (drift ?? -1) >= 0
             } else {
                 let requiredSleeps = mode == "awake" ? 0 : mode == "multiple" ? 2 : 1
                 passed = beforeSleeps >= requiredSleeps && beforeWakes >= requiredSleeps
                     && timingOK && count == 1 && state.status == .satisfied
             }
-            finish(passed: passed, details: "inspections=\(count) sleeps=\(beforeSleeps) wakes=\(wakes.count) drift_s=\(drift.map(String.init(describing:)) ?? "none") status=\(state.status)")
+            finish(passed: passed, details: "inspections=\(count) fake_warmups=\(warmups) sleeps=\(beforeSleeps) wakes=\(wakes.count) drift_s=\(drift.map(String.init(describing:)) ?? "none") status=\(state.status)")
         }
     }
 
@@ -110,15 +113,22 @@ private final class SchedulerSleepProbe {
 }
 
 private actor ProbeBackend {
-    private let reset: Date
+    private var reset: Date
+    private var active: Bool
+    private var warmups = 0
     private var count = 0
     private var inspectedAt: Date?
-    init(reset: Date) { self.reset = reset }
+    init(reset: Date, active: Bool) { self.reset = reset; self.active = active }
     func inspect(_ id: String) -> Inspection {
         count += 1
-        inspectedAt = Date()
+        if inspectedAt == nil { inspectedAt = Date() }
         return Inspection(cliURL: URL(fileURLWithPath: "/unused-sleep-probe"),
-                          quota: QuotaWindow(active: true, resetsAt: reset), operationID: id)
+                          quota: QuotaWindow(active: active, resetsAt: active ? reset : nil), operationID: id)
     }
-    func result() -> (Int, Date?) { (count, inspectedAt) }
+    func warm() {
+        warmups += 1
+        active = true
+        reset = Date().addingTimeInterval(18_000)
+    }
+    func result() -> (Int, Date?, Int, Date) { (count, inspectedAt, warmups, reset) }
 }
