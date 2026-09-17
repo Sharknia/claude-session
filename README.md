@@ -1,13 +1,13 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.4-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.5-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 정해진 시각부터 Claude Code의 5시간 사용량 창을 준비하는 macOS 메뉴바 앱입니다. 업무 시작 전에 첫 창을 열고, 실제 리셋 시각에 맞춰 후속 창을 관리합니다.
 
-> 지연 복구 동작은 이 브랜치의 변경 사항입니다. 공개된 기존 0.1.4 빌드 9에는 아직 포함되지 않습니다.
+> 0.1.5부터 잠자기·앱 종료로 지연된 당일 예약을 복구합니다. 이미 활성인 창과 미확인 전송을 확인해 중복 워밍을 방지합니다.
 
 ## 주요 기능
 
