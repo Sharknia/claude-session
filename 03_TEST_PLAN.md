@@ -4,13 +4,13 @@
 
 이 문서는 `REQ-001`~`REQ-013`과 `FLOW-001`~`FLOW-013`을 기준으로, MVP가 필요한 창만 안전하게 워밍하고 결과를 설명할 수 있는지 검증한다. 대상은 macOS 14+ SwiftUI 메뉴바 앱, direct browser OAuth PKCE와 단일 managed credential, Claude CLI 기반 PTY 워밍, 실행 요일과 한국 공휴일, 일일 자동 3개 창, `five_hour.resets_at` 기반 후속 실행, 상태·수동 제어·알림·macOS 로그인 시 실행, 서명·공증 DMG다.
 
-실제 절전·덮개 닫힘·종료 중 실행과 놓친 작업의 catch-up은 지원하지 않는다. 다중 Claude 계정·계정 전환·앱 내 Claude 로그아웃, Claude 서비스 자체의 가용성·과금 정책과 Mac 깨우기는 테스트 범위 밖이다.
+당일 지연된 작업은 복귀·앱 시작·지연 콜백에서 처리한다. 실제 절전·덮개 닫힘·종료 중 실행을 보장하지 않으며 DarkWake 실사용 관찰은 사용자 담당이다. 다중 Claude 계정·계정 전환·앱 내 Claude 로그아웃, Claude 서비스 자체의 가용성·과금 정책과 Mac 깨우기는 테스트 범위 밖이다.
 
 ## 2. 원칙과 레벨
 
 - **P0**: 중복/불필요 호출, 일일 자동 3창 초과, 인증정보 노출, 실제 5시간 창 불일치, 설치 불가를 막는다. 하나라도 실패 또는 미실행이면 내부 배포를 차단한다.
 - **P1**: 상태 표시와 수동 제어의 사용성을 확인한다. 알려진 실패는 영향과 후속 조치가 승인된 경우에만 허용한다.
-- **Unit**: 실행일·공휴일·다음 창·T/T+3분 경계와 상태 전이를 순수 계산으로 검증한다.
+- **Unit**: 실행일·공휴일·다음 창·예정 시각 전·147초·3시간 이후와 날짜 경계와 상태 전이를 순수 계산으로 검증한다.
 - **Integration**: fake CLI, fake quota provider, injected Clock으로 호출 횟수와 오케스트레이션을 검증한다.
 - **macOS Integration**: Release 빌드로 Keychain, PTY, 잠금/화면 꺼짐, 로그인 실행, 알림을 검증한다.
 - **Manual Live Acceptance**: 실제 전용 계정에서 PTY 호출과 `resets_at`의 의미를 한 건으로 검증한다.
@@ -28,7 +28,7 @@
 - 공휴일 fixture: 평일 공휴일, 대체공휴일, 주말 중첩 공휴일. 데이터 출처 버전을 고정
 - 자연스럽게 비활성 창이 생긴 내부 Claude 계정. 실제 비밀 값은 증거에 포함하지 않음
 
-표준 자동 시나리오는 첫 T=`09:00`, 재시도 마감=`09:03`, 가상 window=`5분`, 선택 요일=월~금이다.
+표준 자동 시나리오는 첫 T=`09:00`, 재시도 간격=`30초`, 추가 재시도 상한=`3회`, 가상 window=`5분`, 선택 요일=월~금이다.
 
 ## 4. 핵심 테스트 케이스
 
@@ -36,7 +36,7 @@
 
 - 참조: `REQ-002`, `REQ-004`~`REQ-007`; `FLOW-002`~`FLOW-004`
 - 실행: 첫 T와 확인된 `resets_at` 두 번까지 가상 시간을 이동한다.
-- 기대: 첫 1회와 후속 2회만 대상이 된다. 각 창은 T 정시 확인 후 필요 시 호출하며, 첫·두 번째 창이 +3분 뒤 실패해도 각각 `targetAt + 5시간` fallback으로 2·3번째 창을 진행한다. 실제 `resets_at`은 항상 fallback보다 우선하고 네 번째 예약/호출은 없다.
+- 기대: 실제 확인한 서로 다른 창 최대 3개가 대상이다. 실패는 집계하지 않으며 같은 미완료 작업을 제한 재시도한다. 후속 시각은 실제 `resets_at`만 사용하고 가상 fallback이나 네 번째 자동 워밍은 없다.
 - 증거: 날짜·창별 상태, quota 전후 값, CLI 호출 3회의 타임라인과 네 번째 예약 부재.
 
 ### TC-CORE-002 — 요일·한국 공휴일·날짜 경계 (P0, Unit)
@@ -53,28 +53,28 @@
 - 기대: `충족(사용자 창)`으로 기록하고 CLI 호출은 0회다. timer·수동 요청·앱 재시작이 겹쳐도 같은 창을 다시 처리하지 않는다.
 - 증거: 명시적인 spawn-count=0, 창 식별자와 충족 상태.
 
-### TC-CORE-004 — +3분 bounded retry와 dedupe (P0, Integration)
+### TC-CORE-004 — 지연 실행·제한 재시도·중복 방지 (P0, Integration)
 
 - 참조: `REQ-006`, `REQ-007`; `FLOW-003`, `FLOW-004`, `FLOW-008`, `FLOW-010`
 - 실행: quota 반영 지연, CLI 실패/hang, timer·수동 이벤트 동시 도착, T 이후 앱 시작을 주입한다.
-- 기대: 재확인은 정시 시도 이력이 있는 경우에만 T~+3분 안에서 끝난다. 메시지 전송 가능 이력의 수동 요청은 quota 확인만 하고, 정시 이력 없는 과거 창은 PTY 없이 `missed`와 fallback으로 처리한다.
-- 증거: retry 종료 이유, 최대 동시 프로세스=1, 호출/조회 횟수와 메시지 전송 뒤 호출 0회, +3분 이후 호출 0회, orphan process 없음.
+- 기대: 최초 시도 외 최대 3회 재시도하며 시각·횟수를 재시작 후에도 보존한다. 지연된 작업도 현재 상태에 따라 워밍한다. 메시지 전송 가능 이력은 날짜 변경·수동 요청에도 유지하며 명시적인 재전송 확인 없이 새 호출하지 않는다.
+- 증거: retry 종료 이유, 최대 동시 프로세스=1, 호출/조회 횟수와 미확인 전송 뒤 추가 호출 0회, 147초·3시간 지연 시 필요한 호출 1회, orphan process 없음.
 
-### TC-OS-001 — 잠금 지원과 sleep no-catch-up (P0, Integration+macOS)
+### TC-OS-001 — 잠금 지원과 지연 복귀 실행 (P0, Integration+macOS)
 
 - 참조: `REQ-011`; `FLOW-009`, `FLOW-010`
 - 실행: (a) system sleep을 막고 화면만 잠근 상태에서 예약을 확인한다. (b) 정시 시도 없이 T+3분 이후 복귀한다. (c) 예약 등록 뒤 실제 시스템 잠자기를 거쳐 T 전에 복귀한다. 여러 번 잠드는 경우와 주말을 넘기는 예약도 확인한다.
-- 기대: (a)는 예약과 결과 기록이 정상 동작한다. (b)는 `놓침`과 fallback을 기록하고 PTY를 실행하지 않는다. (c)는 잠든 시간을 더하지 않고 원래 T에 처리한다.
-- 증거: 같은 예약 식별자의 등록·콜백·MainActor 처리 기록, 실제 sleep/wake 기록, (b)의 복귀 후 spawn-count=0. 시스템 잠자기 자체나 앱 종료 중 실행은 보장하지 않는다.
-- 자동 회귀: `SchedulerRecoveryTests`에서 실제 시각 변경, 5초·3분 경계, 재시도 시각 보존, 설정 교체, 실행 중 복귀, 조회 중 마감 경과의 추가 전송 차단을 검증한다. `WallClockTimerTests`에서 실제 큐 콜백, 취소·해제, observer 연결·해제를 검증한다.
-- 실기기 도구: `bash scripts/verify-scheduler.sh before 180`, `multiple 300`, `after 60`. Claude·Keychain 접근 없이 앱과 동일한 AppState·WallClockTimer를 빌드하고 격리된 설정으로 실행한다. 사용자가 실제 잠자기·복귀하며, 잠자기 이벤트가 없으면 합격하지 않는다. `awake 5`는 잠자기 없는 기본 동작 확인만 한다.
+- 기대: (a)는 예약과 결과 기록이 정상 동작한다. (b)는 현재 세션을 확인하고 비활성일 때만 워밍하며 실제 리셋으로 후속 일정을 만든다. (c)는 잠든 시간을 더하지 않고 원래 T에 처리한다.
+- 증거: 같은 예약 식별자의 등록·콜백·MainActor 처리 기록, 실제 sleep/wake 기록, (b)의 비활성 시 복귀 후 spawn-count=1. 시스템 잠자기 자체나 앱 종료 중 실행은 보장하지 않는다.
+- 자동 회귀: `SchedulerRecoveryTests`에서 실제 시각 변경, 정시·147초·3시간 지연, 재시도 시각 보존, 설정 교체, 실행 중 복귀, 조회 중 잠자기 이후 재조회와 변경된 일정의 전송 차단을 검증한다. `WallClockTimerTests`에서 실제 큐 콜백, 취소·해제, observer 연결·해제를 검증한다.
+- 실기기 도구: `bash scripts/verify-scheduler.sh before 180`, `multiple 300`, `after 60`. Claude·Keychain 접근 없이 앱과 동일한 AppState·WallClockTimer를 빌드하고 격리된 설정으로 실행한다. 사용자가 실제 잠자기·복귀하며, 잠자기 이벤트가 없으면 합격하지 않는다. `awake 5`는 잠자기 없는 기본 동작, `late 147`은 실제 타이머가 지난 예약을 전달한 뒤 가짜 워밍 1회·확인·저장을 수행하는 검증이다. 두 모드 모두 실제 Claude를 호출하지 않는다.
 - `timer.callback`은 백그라운드 콜백 진입, `timer.fired`는 MainActor 처리 진입이다. `timer_id`, `callback_at`, `fired_at`, `delivery_delay_ms`로 전달 구간을 구별한다. `schedule.reconciled`는 복귀·시각 변경 전후 목표를 기록한다.
 
 ### TC-AUTH-001 — direct browser OAuth PKCE·managed Keychain (P0, Integration+macOS)
 
 - 참조: `REQ-008`; `FLOW-001`, `FLOW-007`
 - 실행: (a) 일정 저장만 수행한다. (b) `127.0.0.1` ephemeral listener의 정상 callback, 잘못된 path/method, state mismatch, bind 실패·timeout·취소를 주입한다. (c) authorize URL과 authorization-code token request를 검사한다. (d) expiry 임박과 usage 401, refresh 실패·managed credential 부재·화면 잠금을 확인한다.
-- 기대: (a)는 OAuth·Keychain을 건드리지 않는다. (b)는 localhost callback만 수락하고 S256 PKCE·state를 검증하며 listener를 항상 종료한다. (c)는 시스템 브라우저를 사용해 authorization code를 직접 교환하고 수동 paste fallback이나 CLI auth subprocess를 호출하지 않는다. Claude Code Keychain에 접근하지 않고 앱 Keychain에 access·회전 refresh·expiry만 `AfterFirstUnlockThisDeviceOnly`로 저장한다. (d)는 refresh를 한 번만 수행하고 새 credential 전체를 함께 저장한 뒤 usage를 한 번만 재시도한다. 실패 시 인증 UI나 PTY 없이 해당 창을 실패 처리하고 첫 창 실패여도 fallback 2·3번째 창을 유지한다.
+- 기대: (a)는 OAuth·Keychain을 건드리지 않는다. (b)는 localhost callback만 수락하고 S256 PKCE·state를 검증하며 listener를 항상 종료한다. (c)는 시스템 브라우저를 사용해 authorization code를 직접 교환하고 수동 paste fallback이나 CLI auth subprocess를 호출하지 않는다. Claude Code Keychain에 접근하지 않고 앱 Keychain에 access·회전 refresh·expiry만 `AfterFirstUnlockThisDeviceOnly`로 저장한다. (d)는 refresh를 한 번만 수행하고 새 credential 전체를 함께 저장한 뒤 usage를 한 번만 재시도한다. 실패 시 인증 UI나 PTY 없이 원인을 표시하고 같은 미완료 작업을 유지한다. 로그인 성공 후 재판정한다.
 - 보안 증거: callback parser·listener 종료, state mismatch와 timeout 결과, authorize URL의 S256 challenge, token request의 grant/code/redirect URI/client ID/verifier/state, 앱 Keychain 속성, refresh/usage 호출 횟수와 spawn-count=0을 기록한다. 토큰·authorization code는 로그와 테스트 실패 메시지에 남기지 않는다.
 - 실기기 판정: 일반 Developer ID 빌드의 로그인에서 cross-app Keychain 승인창이 없어야 한다. ad-hoc·재서명 개발 빌드의 앱 자체 Keychain ACL prompt는 별도로 기록하고 배포 결과로 간주하지 않는다.
 
@@ -96,7 +96,7 @@
 
 - 참조: `REQ-001`, `REQ-012`, `REQ-013`; `FLOW-011`, `FLOW-012`, `FLOW-013`
 - 실행: draft 변경 후 저장/미저장, 별도 direct browser Claude 로그인, 수동 워밍, 알림 허용/거부, macOS 로그인 시 실행 on/off를 확인한다.
-- 기대: 저장 전 예약은 유지되고 저장이 OAuth를 시작하지 않는다. Claude 로그인은 별도 사용자 동작으로만 시작한다. 메뉴에 상태 card·오늘 처리/사용량 metric cards·다음/리셋 schedule card와 동일폭 주요 동작이 보인다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다.
+- 기대: 저장 전 예약은 유지되고 저장이 OAuth를 시작하지 않는다. Claude 로그인은 별도 사용자 동작으로만 시작한다. 메뉴에 상태 card·오늘 확인한 창/사용량 metric cards·다음/리셋 schedule card와 동일폭 주요 동작이 보인다. 활성 주기 중 실제 새 창을 여는 수동 워밍은 다음 창 충족으로 계산한다.
 - 증거: 제어 전후 next-run/상태, 호출 ledger, 알림과 process list.
 
 ### TC-DIST-001 — 서명·공증 DMG smoke (P0, Deployment)
@@ -125,7 +125,7 @@
 | `REQ-003` 한국 공휴일 | `FLOW-002`, `FLOW-005` | TC-CORE-002 |
 | `REQ-004` 자동 최대 3창 | `FLOW-003`, `FLOW-004`, `FLOW-010`, `FLOW-013` | TC-CORE-001, TC-UI-001, TC-LIVE-001 |
 | `REQ-005` 실제 `resets_at` | `FLOW-003`, `FLOW-004`, `FLOW-006`, `FLOW-010`, `FLOW-011` | TC-CORE-001, TC-QUOTA-001, TC-LIVE-001 |
-| `REQ-006` T 정시 확인 | `FLOW-003`, `FLOW-004`, `FLOW-006` | TC-CORE-001, TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
+| `REQ-006` T 이후 상태 확인 | `FLOW-003`, `FLOW-004`, `FLOW-006` | TC-CORE-001, TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
 | `REQ-007` 제한 재시도·중복 방지 | `FLOW-003`, `FLOW-004`, `FLOW-006`, `FLOW-008`, `FLOW-010`, `FLOW-013` | TC-CORE-003, TC-CORE-004, TC-LIVE-001 |
 | `REQ-008` browser OAuth 인증 | `FLOW-001`, `FLOW-003`, `FLOW-007`, `FLOW-008`, `FLOW-011`, `FLOW-013` | TC-AUTH-001 |
 | `REQ-009` quota 어댑터 | `FLOW-001`, `FLOW-003`, `FLOW-007`, `FLOW-008` | TC-QUOTA-001, TC-LIVE-001 |
@@ -147,6 +147,6 @@
 
 ### 월요일 진단 로그
 
-`~/Library/Logs/ClaudeSessionWarmer/events.jsonl`과 `events.previous.jsonl`은 JSONL, 2MiB x2, 디렉터리 `0700`·파일 `0600`으로 유지한다. app start/heartbeat/terminate, lock/display/system sleep/wake, schedule/timer drift, quota HTTP 분류와 response hash·size·top keys·`five_hour` 형태/known fields, 결정 전후, OAuth refresh, PTY spawn/pid/marker/timeout, retry/fallback/final을 검증한다. token·authorization header·code/state/verifier·prompt/output·raw body·path는 fixture·로그·증거에 넣지 않는다.
+`~/Library/Logs/ClaudeSessionWarmer/events.jsonl`과 `events.previous.jsonl`은 JSONL, 2MiB x2, 디렉터리 `0700`·파일 `0600`으로 유지한다. app start/heartbeat/terminate, lock/display/system sleep/wake, schedule/timer drift, quota HTTP 분류와 response hash·size·top keys·`five_hour` 형태/known fields, 결정 전후, OAuth refresh, PTY spawn/pid/marker/timeout, retry/recovery_wait/completed을 검증한다. token·authorization header·code/state/verifier·prompt/output·raw body·path는 fixture·로그·증거에 넣지 않는다.
 
 내부 배포는 모든 P0 자동/macOS 테스트, secret 확인, `TC-DIST-001`, `TC-LIVE-001`이 Pass일 때만 허용한다. quota/CLI/인증 방식 변경 시 TC-AUTH-001, TC-PTY-001, TC-QUOTA-001, TC-LIVE-001을 재실행하고, scheduler 변경 시 TC-CORE-001~004를 재실행한다.

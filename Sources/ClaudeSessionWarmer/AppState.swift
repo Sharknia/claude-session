@@ -36,7 +36,7 @@ final class AppState: ObservableObject {
     private(set) var scheduledTimerID: UUID?
     private var needsFreshSchedule = false
     private var pendingScheduleReasons: Set<String> = []
-    private var startedTargetsThisRun: Set<Date> = []
+    private var scheduleRevision = 0
     private var isSilentRefreshRunning = false
     private var lastSilentRefreshAt: Date?
 
@@ -49,7 +49,14 @@ final class AppState: ObservableObject {
         warmClaude: (@Sendable (URL, String) async throws -> Void)? = nil,
         confirmationSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
-        let savedCycle = store.loadDailyCycle()
+        var savedCycle = store.loadDailyCycle()
+        // 구버전 횟수는 당일 상한으로 보존한다. 확인된 성공의 전송 표식만 정리한다.
+        if savedCycle.lastWarmupAttemptAt == nil,
+           savedCycle.lastRecord?.status == .succeeded || savedCycle.lastRecord?.status == .satisfied {
+            savedCycle.lastConfirmedResetAt = savedCycle.lastConfirmedResetAt ?? savedCycle.nextResetAt
+            savedCycle.lastWarmupTargetAt = nil
+            savedCycle.lastWarmupAttemptAt = nil
+        }
         self.store = store
         self.engine = engine
         self.schedulerEnabled = startScheduler
@@ -84,7 +91,7 @@ final class AppState: ObservableObject {
                     self?.reconcileSchedule(reason: reason)
                 }
             }
-            scheduleNext()
+            reconcileSchedule(reason: "startup")
         }
     }
 
@@ -120,6 +127,7 @@ final class AppState: ObservableObject {
         settings.excludeKoreanHolidays = excludeKoreanHolidays
         applyLaunchAtLogin(launchAtLogin)
         store.saveSettings(settings)
+        scheduleRevision += 1
         scheduleNext(reason: "settings_changed")
         return true
     }
@@ -163,6 +171,7 @@ final class AppState: ObservableObject {
                 connectionState = .connected
                 status = inspection.quota.active ? .satisfied : .idle
                 statusMessage = "Claude에 연결했습니다."
+                reconcileSchedule(reason: "login_completed")
             } catch {
                 currentQuota = nil
                 updateConnectionFailure(error)
@@ -212,49 +221,56 @@ final class AppState: ObservableObject {
         }
     }
 
-    func manualWarmup() {
+    var hasUnconfirmedWarmup: Bool { cycle.lastWarmupTargetAt != nil }
+
+    func manualWarmup(allowResend: Bool = false) {
         guard !isWorking else { return }
+        if allowResend {
+            cycle.lastWarmupTargetAt = nil
+            cycle.lastWarmupAttemptAt = nil
+            store.saveDailyCycle(cycle)
+        }
+        let now = clock()
+        var candidateCycle = cycle
+        candidateCycle.firstFailure = nil // 명시적인 수동 재시도는 자동 재시도 상한을 다시 연다.
+        let candidate = engine.nextEvent(after: now, settings: settings, cycle: candidateCycle)
+        let event = candidate.flatMap { $0.date <= now ? $0 : nil }
+        if let event {
+            cycle.firstFailure = nil
+            markScheduledWindowStarted(event)
+        }
         isWorking = true
         isManualWarmupRunning = true
-        let now = clock()
-        let expectedReset = cycle.nextResetAt
-        let belongsToActiveCycle = cycle.dayKey == engine.dayKey(for: now)
-            && cycle.handledWindows > 0
-            && cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
-            && expectedReset.map { now >= $0 } == true
-
         status = .checking
         statusMessage = "세션 상태를 확인하고 있습니다."
         Task {
-            defer { isManualWarmupRunning = false }
+            defer {
+                isManualWarmupRunning = false
+                finishWorking()
+            }
             do {
-                let event = belongsToActiveCycle ? ScheduledEvent(
-                    date: now, targetAt: expectedReset!, dayKey: engine.dayKey(for: now),
-                    windowNumber: cycle.handledWindows + 1
-                ) : nil
                 let result = try await checkSession(
                     targetAt: event?.targetAt ?? now, event: event, context: "manual",
                     operationID: UUID().uuidString
                 )
-                cacheQuota(result.inspection.quota)
                 connectionState = .connected
-                if belongsToActiveCycle {
-                    cycle.handledWindows = min(cycle.handledWindows + 1, ScheduleEngine.maximumWindowsPerDay)
-                    cycle.nextResetAt = cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
-                        ? result.inspection.quota.resetsAt : nil
-                    cycle.firstFailure = nil
+                if let event {
+                    complete(event, quota: result.inspection.quota, status: result.status, message: result.message)
+                } else {
+                    record(result.status, message: result.message)
+                    store.saveDailyCycle(cycle)
                 }
-                // 놓친 예약 정리 뒤 수동 동작의 최종 결과를 표시한다.
-                needsFreshSchedule = true
-                pendingScheduleReasons.insert("manual_completed")
-                finishWorking()
-                record(result.status, message: result.message)
-                store.saveDailyCycle(cycle)
             } catch {
-                updateConnectionFailure(error)
-                finishWorking()
-                record(.failed, message: "수동 워밍 실패: \(error.localizedDescription)")
-                store.saveDailyCycle(cycle)
+                if error as? AppStateError == .scheduleChanged {
+                    scheduleNext(reason: "operation_invalidated")
+                } else if let event {
+                    updateConnectionFailure(error)
+                    handleTargetFailure(error, event: event)
+                } else {
+                    updateConnectionFailure(error)
+                    record(.failed, message: "수동 워밍 실패: \(error.localizedDescription)")
+                    store.saveDailyCycle(cycle)
+                }
             }
         }
     }
@@ -276,7 +292,6 @@ final class AppState: ObservableObject {
         }
         let now = date ?? clock()
         cancelScheduledTimer()
-        reconcileMissedWindows(at: now)
         nextEvent = engine.nextEvent(after: now, settings: settings, cycle: cycle)
         guard let event = nextEvent else {
             diagnosticLog("schedule.selected", [
@@ -290,7 +305,7 @@ final class AppState: ObservableObject {
         var metadata = scheduledMetadata(event)
         metadata["timer_id"] = nil // 새 예약의 식별자는 arm에서 발급한다.
         metadata["selected_at"] = diagnosticDate(now)
-        metadata["source"] = event.windowNumber == 1 ? "first" : "reset_or_fallback"
+        metadata["source"] = event.windowNumber == 1 ? "first" : "reset_or_recovery"
         metadata["handled_windows"] = "\(cycle.handledWindows)"
         diagnosticLog("schedule.selected", metadata)
         arm(event, at: event.date, reason: reason)
@@ -298,6 +313,12 @@ final class AppState: ObservableObject {
 
     /// 복귀 시 남은 시간을 다시 계산하되, 유효한 재시도 시각은 앞당기지 않는다.
     func reconcileSchedule(reason: String) {
+        scheduleRevision += 1
+        if ["system_wake", "startup", "login_completed"].contains(reason),
+           cycle.firstFailure != nil, cycle.firstFailure?.retryAt == nil {
+            cycle.firstFailure?.retryAt = clock()
+            store.saveDailyCycle(cycle)
+        }
         pendingScheduleReasons.insert(reason)
         cancelScheduledTimer()
         guard !isWorking else { return }
@@ -315,24 +336,9 @@ final class AppState: ObservableObject {
         let now = clock()
         let previous = nextEvent
         let reason = pendingScheduleReasons.sorted().joined(separator: ",")
-        let mustSelectFresh = needsFreshSchedule
         pendingScheduleReasons.removeAll()
         needsFreshSchedule = false
-
-        let candidate = engine.nextEvent(after: now, settings: settings, cycle: cycle)
-        if !mustSelectFresh, let previous,
-           engine.position(of: previous.targetAt, at: now) == .missed,
-           !(cycle.dayKey == previous.dayKey && cycle.handledWindows >= previous.windowNumber) {
-            closeMissed(previous)
-        } else if let previous,
-           (!mustSelectFresh || (previous.date > previous.targetAt && hasStartedEvent(previous))),
-           candidate?.targetAt == previous.targetAt,
-           candidate?.windowNumber == previous.windowNumber,
-           candidate?.dayKey == previous.dayKey {
-            arm(previous, at: max(now, previous.date), reason: reason)
-        } else {
-            scheduleNext(after: now, reason: reason)
-        }
+        scheduleNext(after: now, reason: reason)
         diagnosticLog("schedule.reconciled", [
             "reason": reason,
             "previous_target_at": diagnosticDate(previous?.targetAt),
@@ -409,14 +415,13 @@ final class AppState: ObservableObject {
             arm(event, at: now.addingTimeInterval(5), reason: "working")
             return
         }
-        if engine.position(of: event.targetAt, at: now) == .missed {
-            closeMissed(event)
+        guard eventIsCurrent(event, at: now) else {
+            scheduleNext(reason: "event_changed")
             return
         }
-        let isLateBeyondTimerJitter = now.timeIntervalSince(event.targetAt) > 5
-        let hasStartedAttempt = hasStartedEvent(event)
-        if isLateBeyondTimerJitter, !hasStartedAttempt {
-            closeMissed(event)
+        let candidate = engine.nextEvent(after: now, settings: settings, cycle: cycle)
+        if let candidate, candidate.date > now {
+            arm(candidate, at: candidate.date, reason: "retry_wait")
             return
         }
 
@@ -424,11 +429,6 @@ final class AppState: ObservableObject {
     }
 
     private func performScheduledWarmup(for event: ScheduledEvent, timerID: UUID?) {
-        if event.windowNumber == 1, cycle.dayKey != event.dayKey {
-            cycle = engine.newCycle(startingAt: event.targetAt)
-            store.saveDailyCycle(cycle)
-        }
-
         markScheduledWindowStarted(event)
 
         isWorking = true
@@ -442,7 +442,7 @@ final class AppState: ObservableObject {
                 do {
                     let result = try await checkSession(
                         targetAt: event.targetAt, event: event, context: "scheduled",
-                        operationID: quotaOperationID, deadline: engine.timing(for: event.targetAt).expiresAt
+                        operationID: quotaOperationID
                     )
                     complete(event, quota: result.inspection.quota,
                              status: result.status,
@@ -452,8 +452,12 @@ final class AppState: ObservableObject {
                     failureMetadata["operation_id"] = quotaOperationID
                     failureMetadata["error_code"] = diagnosticErrorCode(error)
                     diagnosticLog("window.attempt_failed", failureMetadata)
-                    updateConnectionFailure(error)
-                    handleTargetFailure(error, event: event)
+                    if error as? AppStateError == .scheduleChanged {
+                        scheduleNext(reason: "operation_invalidated")
+                    } else {
+                        updateConnectionFailure(error)
+                        handleTargetFailure(error, event: event)
+                    }
                 }
             }
         }
@@ -461,10 +465,22 @@ final class AppState: ObservableObject {
 
     /// 수동·자동 워밍의 조회, 중복 방지, 호출, 활성화 확인을 동일하게 처리한다.
     private func checkSession(
-        targetAt: Date, event: ScheduledEvent?, context: String, operationID: String,
-        deadline: Date? = nil
+        targetAt: Date, event: ScheduledEvent?, context: String, operationID: String
     ) async throws -> SessionCheckResult {
-        let initial = try await inspectClaude(operationID)
+        var initial: Inspection
+        var inspectedRevision: Int
+        var inspectedAt: Date
+        var refreshes = 0
+        repeat {
+            inspectedRevision = scheduleRevision
+            inspectedAt = clock()
+            initial = try await inspectClaude(operationID)
+            refreshes += 1
+        } while (inspectedRevision != scheduleRevision || clock().timeIntervalSince(inspectedAt) > 30) && refreshes < 2
+        guard inspectedRevision == scheduleRevision, clock().timeIntervalSince(inspectedAt) <= 30 else {
+            throw URLError(.timedOut)
+        }
+        if let event, !eventIsCurrent(event, at: clock()) { throw AppStateError.scheduleChanged }
         connectionState = .connected
         cacheQuota(initial.quota)
         logQuotaDecision(initial.quota, phase: "\(context)_pre", operationID: operationID, event: event)
@@ -472,16 +488,14 @@ final class AppState: ObservableObject {
             return SessionCheckResult(inspection: initial, performedWarmup: false)
         }
         guard !initial.quota.active else { throw AppStateError.quotaNotReset }
-        // 조회 도중 잠자기·시각 변경으로 마감을 넘겼다면 새 메시지를 전송하지 않는다.
-        if let deadline, clock() > deadline { throw AppStateError.quotaNotActivated }
 
         let suppressed = shouldSuppressWarmup(for: targetAt, at: clock())
         var warmupError: Error?
         if !suppressed {
             cycle.lastWarmupTargetAt = targetAt
+            cycle.lastWarmupAttemptAt = clock()
+            record(.warming, message: "세션을 활성화하고 있습니다.")
             store.saveDailyCycle(cycle)
-            status = .warming
-            statusMessage = "세션을 활성화하고 있습니다."
             let warmupOperationID = UUID().uuidString
             var metadata = event.map(scheduledMetadata) ?? [:]
             metadata["context"] = context
@@ -492,6 +506,7 @@ final class AppState: ObservableObject {
             } catch {
                 if error as? ClaudeServiceError == .warmupNotStarted {
                     cycle.lastWarmupTargetAt = nil
+                    cycle.lastWarmupAttemptAt = nil
                     store.saveDailyCycle(cycle)
                     throw error
                 }
@@ -505,7 +520,7 @@ final class AppState: ObservableObject {
         record(.checking, message: "세션 활성화를 확인하고 있습니다.")
         store.saveDailyCycle(cycle)
         var lastError = warmupError
-        let confirmationDeadline = min(clock().addingTimeInterval(60), deadline ?? .distantFuture)
+        let confirmationDeadline = clock().addingTimeInterval(60)
         for seconds in [5, 10, 15, 15, 15] {
             if clock().addingTimeInterval(Double(seconds)) > confirmationDeadline { break }
             try await confirmationSleep(.seconds(seconds))
@@ -524,41 +539,36 @@ final class AppState: ObservableObject {
                 return SessionCheckResult(inspection: inspection, performedWarmup: !suppressed)
             }
         }
-        throw lastError ?? AppStateError.quotaNotActivated
+        throw lastError ?? AppStateError.recentWarmupUnconfirmed
     }
 
     private func sessionIsActive(_ quota: QuotaWindow, event: ScheduledEvent?) -> Bool {
-        if let event { return isFreshWindow(quota, for: event) }
-        return quota.active && quota.resetsAt != nil
+        guard quota.active, let resetsAt = quota.resetsAt, resetsAt > clock() else { return false }
+        cycle.lastWarmupTargetAt = nil
+        cycle.lastWarmupAttemptAt = nil
+        store.saveDailyCycle(cycle)
+        return true
+    }
+
+    private func eventIsCurrent(_ event: ScheduledEvent, at now: Date) -> Bool {
+        guard event.dayKey == engine.dayKey(for: now),
+              let first = engine.firstWarmup(on: now, settings: settings), now >= first else { return false }
+        let candidate = engine.nextEvent(after: now, settings: settings, cycle: cycle)
+        return candidate?.targetAt == event.targetAt && candidate?.windowNumber == event.windowNumber
     }
 
     func markScheduledWindowStarted(_ event: ScheduledEvent) {
+        if cycle.dayKey != event.dayKey {
+            let pendingTarget = cycle.lastWarmupTargetAt
+            let pendingAttempt = cycle.lastWarmupAttemptAt
+            cycle = engine.newCycle(startingAt: event.targetAt)
+            cycle.lastWarmupTargetAt = pendingTarget
+            cycle.lastWarmupAttemptAt = pendingAttempt
+        }
         if cycle.firstFailure?.targetAt != event.targetAt { cycle.firstFailure = nil }
-        startedTargetsThisRun.insert(event.targetAt)
         cycle.nextResetAt = event.targetAt
         record(.checking, message: "\(event.windowNumber)번째 창 확인 시작")
         store.saveDailyCycle(cycle)
-    }
-
-    private func hasStartedEvent(_ event: ScheduledEvent) -> Bool {
-        if startedTargetsThisRun.contains(event.targetAt)
-            || cycle.lastWarmupTargetAt == event.targetAt {
-            return true
-        }
-        guard
-            cycle.nextResetAt == event.targetAt,
-            let record = cycle.lastRecord,
-            record.status == .checking || record.status == .failed,
-            let startedAt = cycle.lastRecord?.timestamp
-        else { return false }
-        return (-5...ScheduleEngine.windowTolerance).contains(
-            startedAt.timeIntervalSince(event.targetAt)
-        )
-    }
-
-    private func isFreshWindow(_ quota: QuotaWindow, for event: ScheduledEvent) -> Bool {
-        guard quota.active, let resetsAt = quota.resetsAt else { return false }
-        return event.windowNumber == 1 || resetsAt > event.targetAt
     }
 
     private func complete(
@@ -569,10 +579,14 @@ final class AppState: ObservableObject {
     ) {
         cacheQuota(quota)
         cycle.firstFailure = nil
-        cycle.handledWindows = min(
-            max(cycle.handledWindows, event.windowNumber),
-            ScheduleEngine.maximumWindowsPerDay
-        )
+        // 서버 시각의 1분 이내 보정은 같은 창으로 취급한다.
+        let alreadyCounted = cycle.lastConfirmedResetAt.map {
+            abs($0.timeIntervalSince(quota.resetsAt!)) <= 60
+        } ?? false
+        if !alreadyCounted {
+            cycle.handledWindows = min(cycle.handledWindows + 1, ScheduleEngine.maximumWindowsPerDay)
+        }
+        cycle.lastConfirmedResetAt = quota.resetsAt
         cycle.nextResetAt = cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
             ? quota.resetsAt
             : nil
@@ -584,7 +598,6 @@ final class AppState: ObservableObject {
         metadata["handled_windows"] = "\(cycle.handledWindows)"
         metadata["next_target_at"] = diagnosticDate(cycle.nextResetAt)
         diagnosticLogCritical("window.completed", metadata)
-        startedTargetsThisRun.remove(event.targetAt)
         scheduleNext(after: clock().addingTimeInterval(0.1))
     }
 
@@ -593,7 +606,7 @@ final class AppState: ObservableObject {
             switch serviceError {
             case .oauthRefreshUnavailable, .quotaRateLimited, .quotaUnavailable:
                 return true
-            case .warmupTimedOut, .warmupFailed:
+            case .warmupNotStarted, .warmupTimedOut, .warmupFailed:
                 // 이미 전송됐을 수 있다. 기존 중복 방지에 따라 후속 시도는 사용량만 확인한다.
                 return true
             default: return false
@@ -610,113 +623,37 @@ final class AppState: ObservableObject {
                 targetAt: event.targetAt, message: "워밍 확인 실패: \(error.localizedDescription)"
             )
         }
-        let failureMessage = cycle.firstFailure!.message
-        let expiresAt = engine.timing(for: event.targetAt).expiresAt
+        let attempts = (cycle.firstFailure?.attempts ?? 0) + 1
+        cycle.firstFailure?.attempts = attempts
         let retryAt = now.addingTimeInterval(30)
-        if Self.shouldRetryScheduledFailure(error), retryAt <= expiresAt {
-            record(.checking, message: "잠시 후 세션 상태를 다시 확인합니다.")
-            store.saveDailyCycle(cycle)
-            var metadata = scheduledMetadata(event)
-            metadata["retry_at"] = diagnosticDate(retryAt)
-            metadata["deadline_at"] = diagnosticDate(expiresAt)
-            metadata["error_code"] = diagnosticErrorCode(error)
-            diagnosticLog("window.retry_armed", metadata)
-            let retryEvent = ScheduledEvent(
-                date: retryAt,
-                targetAt: event.targetAt,
-                dayKey: event.dayKey,
-                windowNumber: event.windowNumber
-            )
-            nextEvent = retryEvent
-            arm(retryEvent, at: retryAt)
-            return
-        }
-
-        advanceAfterUnresolvedWindow(
-            targetAt: event.targetAt,
-            windowNumber: event.windowNumber,
-            status: .failed,
-            message: failureMessage
-        )
-        if schedulerEnabled { notifyFailure(statusMessage) }
-        scheduleNext(after: now.addingTimeInterval(0.1))
-    }
-
-    private func closeMissed(_ event: ScheduledEvent) {
-        if event.windowNumber == 1, cycle.dayKey != event.dayKey {
-            cycle = engine.newCycle(startingAt: event.targetAt)
-        }
-        advanceAfterUnresolvedWindow(
-            targetAt: event.targetAt,
-            windowNumber: event.windowNumber,
-            status: .missed,
-            message: "예약 시각을 놓쳐 해당 창은 따라잡지 않습니다."
-        )
-        scheduleNext(after: clock().addingTimeInterval(0.1))
-    }
-
-    func reconcileMissedWindows(at now: Date) {
-        let todayKey = engine.dayKey(for: now)
-        if let firstTarget = engine.firstWarmup(on: now, settings: settings), firstTarget < now {
-            if cycle.dayKey != todayKey {
-                cycle = engine.newCycle(startingAt: firstTarget)
-                advanceAfterUnresolvedWindow(
-                    targetAt: firstTarget,
-                    windowNumber: 1,
-                    status: .missed,
-                    message: "첫 워밍 시각을 놓쳐 해당 창은 따라잡지 않습니다."
-                )
-            }
-        }
-
-        while let resetAt = cycle.nextResetAt,
-              cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay,
-              engine.dayKey(for: resetAt) == cycle.dayKey,
-              engine.position(of: resetAt, at: now) == .missed {
-            advanceAfterUnresolvedWindow(
-                targetAt: resetAt,
-                windowNumber: cycle.handledWindows + 1,
-                status: .missed,
-                message: "리셋 시각을 놓쳐 해당 창은 따라잡지 않습니다."
-            )
-        }
-    }
-
-    func advanceAfterUnresolvedWindow(
-        targetAt: Date,
-        windowNumber: Int,
-        status newStatus: WarmupStatus,
-        message: String
-    ) {
-        guard windowNumber > cycle.handledWindows else { return }
-        let originalFailure = cycle.firstFailure.flatMap { $0.targetAt == targetAt ? $0 : nil }
-        let finalStatus: WarmupStatus = originalFailure == nil ? newStatus : .failed
-        let finalMessage = originalFailure?.message ?? message
-        cycle.handledWindows = min(
-            max(cycle.handledWindows, windowNumber),
-            ScheduleEngine.maximumWindowsPerDay
-        )
-        cycle.nextResetAt = cycle.handledWindows < ScheduleEngine.maximumWindowsPerDay
-            ? targetAt.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            : nil
-        startedTargetsThisRun.remove(targetAt)
-        record(finalStatus, message: finalMessage)
+        let canRetry = Self.shouldRetryScheduledFailure(error) && attempts <= 3
+        cycle.firstFailure?.retryAt = canRetry ? retryAt : nil
+        record(canRetry ? .checking : .failed, message: canRetry
+            ? "30초 후 세션 상태를 다시 확인합니다."
+            : hasUnconfirmedWarmup
+                ? "전송 결과 미확인: 다시 전송하지 않습니다. 상태 확인 또는 재전송을 선택해 주세요."
+                : "\(cycle.firstFailure!.message) · 복귀 또는 지금 워밍으로 재시도할 수 있습니다.")
         store.saveDailyCycle(cycle)
-        diagnosticLogCritical("window.unresolved", [
-            "timer_id": DiagnosticContext.scheduledTimerID ?? "none",
-            "target_at": diagnosticDate(targetAt),
-            "window": "\(windowNumber)",
-            "outcome": String(describing: finalStatus),
-            "fallback_at": diagnosticDate(cycle.nextResetAt),
-            "handled_windows": "\(cycle.handledWindows)"
-        ])
+        var metadata = scheduledMetadata(event)
+        metadata["attempts"] = "\(attempts)"
+        metadata["retry_at"] = diagnosticDate(cycle.firstFailure?.retryAt)
+        metadata["error_code"] = diagnosticErrorCode(error)
+        metadata["handled_windows"] = "\(cycle.handledWindows)"
+        diagnosticLogCritical(canRetry ? "window.retry_armed" : "window.recovery_wait", metadata)
+        if canRetry {
+            let retry = ScheduledEvent(date: retryAt, targetAt: event.targetAt,
+                                       dayKey: event.dayKey, windowNumber: event.windowNumber)
+            nextEvent = retry
+            arm(retry, at: retryAt, reason: "retry")
+        } else {
+            if schedulerEnabled { notifyFailure(statusMessage) }
+            scheduleNext(after: now, reason: "recovery_wait")
+        }
     }
 
     func shouldSuppressWarmup(for targetAt: Date, at now: Date) -> Bool {
-        guard let lastTarget = cycle.lastWarmupTargetAt else { return false }
-        return lastTarget == targetAt
-            || abs(targetAt.timeIntervalSince(lastTarget)) <= ScheduleEngine.windowTolerance
-            || (0...ScheduleEngine.windowTolerance).contains(now.timeIntervalSince(lastTarget))
+        // 미확인 전송은 시간 경과·날짜 변경·재시작으로 해제하지 않는다.
+        hasUnconfirmedWarmup
     }
 
     private func scheduledMetadata(_ event: ScheduledEvent) -> [String: String] {
@@ -764,6 +701,7 @@ final class AppState: ObservableObject {
         case .quotaNotReset: return "quota_not_reset"
         case .quotaNotActivated: return "quota_not_activated"
         case .recentWarmupUnconfirmed: return "recent_warmup_unconfirmed"
+        case .scheduleChanged: return "schedule_changed"
         }
     }
 
@@ -864,12 +802,15 @@ struct Inspection: Sendable {
 }
 
 private enum AppStateError: LocalizedError {
+    case scheduleChanged
     case quotaNotReset
     case quotaNotActivated
     case recentWarmupUnconfirmed
 
     var errorDescription: String? {
         switch self {
+        case .scheduleChanged:
+            return "일정이 변경되어 현재 조건으로 다시 확인합니다."
         case .quotaNotReset:
             return "이전 사용량 창이 아직 종료되지 않았습니다."
         case .quotaNotActivated:

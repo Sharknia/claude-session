@@ -24,6 +24,7 @@ struct MenuContent: View {
     @State private var draftExcludeHolidays: Bool
     @State private var draftLaunchAtLogin: Bool
     @State private var didSave = false
+    @State private var confirmResend = false
 
     private let weekdays = [
         (1, "일"), (2, "월"), (3, "화"), (4, "수"), (5, "목"), (6, "금"), (7, "토")
@@ -45,6 +46,17 @@ struct MenuContent: View {
             scheduleSettings
             Divider()
             actions
+            if state.hasUnconfirmedWarmup {
+                Button("미확인 전송을 해제하고 다시 워밍…") { confirmResend = true }
+                    .font(.caption)
+                    .disabled(state.isWorking)
+                    .alert("이전 요청이 이미 전송됐을 수 있습니다.", isPresented: $confirmResend) {
+                        Button("취소", role: .cancel) {}
+                        Button("확인 후 다시 전송") { state.manualWarmup(allowResend: true) }
+                    } message: {
+                        Text("현재 세션을 먼저 확인합니다. 비활성이면 이전 전송 기록을 해제하고 한 번 더 워밍합니다.")
+                    }
+            }
             Divider()
             footer
         }
@@ -79,7 +91,7 @@ struct MenuContent: View {
             HStack(spacing: 8) {
                 metricCard(
                     value: "\(state.handledWindowsToday)/3",
-                    label: "오늘 처리",
+                    label: "오늘 확인한 창",
                     progress: Double(state.handledWindowsToday) / 3
                 )
                 metricCard(

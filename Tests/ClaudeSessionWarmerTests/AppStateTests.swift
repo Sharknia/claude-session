@@ -92,62 +92,6 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testFirstAndSecondFailuresKeepSchedulingTheDailyChain() {
-        withStore { store in
-            let firstTarget = Date(timeIntervalSince1970: 1_800_000_000)
-            let state = AppState(store: store, startScheduler: false)
-
-            state.advanceAfterUnresolvedWindow(
-                targetAt: firstTarget,
-                windowNumber: 1,
-                status: .failed,
-                message: "first failed"
-            )
-            XCTAssertEqual(state.cycle.handledWindows, 1)
-            XCTAssertEqual(
-                state.cycle.nextResetAt,
-                firstTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            )
-
-            let secondTarget = try! XCTUnwrap(state.cycle.nextResetAt)
-            state.advanceAfterUnresolvedWindow(
-                targetAt: secondTarget,
-                windowNumber: 2,
-                status: .failed,
-                message: "second failed"
-            )
-            XCTAssertEqual(state.cycle.handledWindows, 2)
-            XCTAssertEqual(
-                state.cycle.nextResetAt,
-                secondTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            )
-        }
-    }
-
-    @MainActor
-    func testThirdUnresolvedWindowEndsTheDailyChain() {
-        withStore { store in
-            let target = Date(timeIntervalSince1970: 1_800_000_000)
-            store.saveDailyCycle(DailyCycle(
-                dayKey: "2026-09-04",
-                handledWindows: 2,
-                nextResetAt: target
-            ))
-            let state = AppState(store: store, startScheduler: false)
-
-            state.advanceAfterUnresolvedWindow(
-                targetAt: target,
-                windowNumber: 3,
-                status: .failed,
-                message: "third failed"
-            )
-
-            XCTAssertEqual(state.cycle.handledWindows, 3)
-            XCTAssertNil(state.cycle.nextResetAt)
-        }
-    }
-
-    @MainActor
     func testStartedWindowPersistsTargetForRestartRecovery() {
         withStore { store in
             let target = Date(timeIntervalSince1970: 1_800_000_000)
@@ -167,158 +111,71 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testRestartTwoMinutesAfterFirstTargetMarksItMissedWithoutCalling() {
-        withStore { store in
-            let calendar = seoulCalendar()
-            let engine = ScheduleEngine(calendar: calendar)
-            store.saveSettings(ScheduleSettings(
-                firstWarmupMinutes: 6 * 60,
-                weekdays: Set(1...7),
-                excludeKoreanHolidays: false
-            ))
-            let state = AppState(store: store, engine: engine, startScheduler: false)
-            let firstTarget = date(2026, 9, 4, 6, calendar: calendar)
-
-            state.reconcileMissedWindows(at: firstTarget.addingTimeInterval(2 * 60))
-
-            XCTAssertEqual(state.cycle.handledWindows, 1)
-            XCTAssertEqual(state.cycle.lastRecord?.status, .missed)
-            XCTAssertNil(state.cycle.lastWarmupTargetAt)
-            XCTAssertEqual(
-                state.cycle.nextResetAt,
-                firstTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            )
-        }
-    }
-
-    @MainActor
-    func testRestartAfterGraceAdvancesSecondAndThirdFallbacks() {
-        withStore { store in
-            let calendar = seoulCalendar()
-            let engine = ScheduleEngine(calendar: calendar)
-            store.saveSettings(ScheduleSettings(
-                firstWarmupMinutes: 60,
-                weekdays: Set(1...7),
-                excludeKoreanHolidays: false
-            ))
-            let state = AppState(store: store, engine: engine, startScheduler: false)
-            let firstTarget = date(2026, 9, 4, 1, calendar: calendar)
-            let secondTarget = firstTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-            let thirdTarget = secondTarget.addingTimeInterval(ScheduleEngine.quotaWindowDuration)
-
-            state.reconcileMissedWindows(at: secondTarget.addingTimeInterval(4 * 60))
-            XCTAssertEqual(state.cycle.handledWindows, 2)
-            XCTAssertEqual(state.cycle.nextResetAt, thirdTarget)
-
-            state.reconcileMissedWindows(at: thirdTarget.addingTimeInterval(4 * 60))
-            XCTAssertEqual(state.cycle.handledWindows, 3)
-            XCTAssertNil(state.cycle.nextResetAt)
-        }
-    }
-
-    @MainActor
-    func testScheduledWarmupSuppressesRecentManualMarker() {
+    func testUnconfirmedTransmissionNeverExpiresByTimeAlone() {
         withStore { store in
             let target = Date(timeIntervalSince1970: 1_800_000_000)
-            store.saveDailyCycle(DailyCycle(
-                lastWarmupTargetAt: target.addingTimeInterval(-60)
-            ))
+            store.saveDailyCycle(DailyCycle(lastWarmupTargetAt: target))
             let state = AppState(store: store, startScheduler: false)
-
-            XCTAssertTrue(state.shouldSuppressWarmup(for: target, at: target))
-            XCTAssertTrue(
-                state.shouldSuppressWarmup(
-                    for: target,
-                    at: target.addingTimeInterval(ScheduleEngine.windowTolerance)
-                )
-            )
-            XCTAssertFalse(
-                state.shouldSuppressWarmup(
-                    for: target.addingTimeInterval(600),
-                    at: target.addingTimeInterval(181)
-                )
-            )
-        }
-    }
-
-    @MainActor
-    func testAuthenticationFailureAdvancesOnceAndNeverReopensFirstWindow() {
-        withStore { store in
-            let calendar = seoulCalendar()
-            let engine = ScheduleEngine(calendar: calendar)
-            let target = date(2026, 9, 7, 6, calendar: calendar)
-            let settings = ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false)
-            store.saveSettings(settings)
-            store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target)))
-            let state = AppState(store: store, engine: engine, startScheduler: false)
-            let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
-            state.markScheduledWindowStarted(event)
-            state.handleTargetFailure(ClaudeServiceError.oauthRefreshFailed, event: event, at: target)
-            let terminal = state.cycle
-            XCTAssertEqual(terminal.handledWindows, 1)
-            XCTAssertEqual(terminal.lastRecord?.status, .failed)
-            XCTAssertEqual(state.nextEvent?.windowNumber, 2)
-            XCTAssertEqual(state.nextEvent?.targetAt, target.addingTimeInterval(5 * 3600))
-
-            // 실제 장애의 258회 재선택·missed 덮어쓰기를 재현하는 입력이다.
-            for index in 0..<258 {
-                state.advanceAfterUnresolvedWindow(targetAt: target, windowNumber: 1, status: .missed, message: "overwrite")
-                state.handleTargetFailure(ClaudeServiceError.quotaUnavailable, event: event, at: target.addingTimeInterval(150))
-                let next = engine.nextEvent(after: target.addingTimeInterval(Double(index) / 10), settings: settings, cycle: state.cycle)
-                XCTAssertEqual(next?.windowNumber, 2)
+            for delay in [0.0, 181, 600, 86_400] {
+                XCTAssertTrue(state.shouldSuppressWarmup(for: target.addingTimeInterval(delay),
+                                                        at: target.addingTimeInterval(delay)))
             }
-            XCTAssertEqual(state.cycle, terminal)
-            XCTAssertEqual(store.loadDailyCycle(), terminal)
         }
     }
 
     @MainActor
-    func testTransientRetriesPreserveFirstFailureThroughRestartAndGraceExpiry() {
+    func testFailuresRemainPendingAndRetriesAreBoundedAcrossRestart() {
         withStore { store in
             let calendar = seoulCalendar()
             let engine = ScheduleEngine(calendar: calendar)
             let target = date(2026, 9, 7, 6, calendar: calendar)
             store.saveSettings(ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false))
-            store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target)))
-            let state = AppState(store: store, engine: engine, startScheduler: false)
+            let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
+            var original: String?
+            for attempt in 1...4 {
+                let now = target.addingTimeInterval(10_800 + Double(attempt * 30))
+                let state = AppState(store: store, engine: engine, startScheduler: false, clock: { now })
+                state.markScheduledWindowStarted(event)
+                state.handleTargetFailure(ClaudeServiceError.quotaUnavailable, event: event, at: now)
+                original = original ?? state.cycle.firstFailure?.message
+                XCTAssertEqual(state.cycle.handledWindows, 0)
+                XCTAssertEqual(state.cycle.nextResetAt, target)
+                XCTAssertEqual(state.cycle.firstFailure?.attempts, attempt)
+                XCTAssertEqual(state.cycle.firstFailure?.message, original)
+                if attempt <= 3 {
+                    XCTAssertEqual(state.nextEvent?.date, now.addingTimeInterval(30))
+                    XCTAssertEqual(state.nextEvent?.windowNumber, 1)
+                } else {
+                    XCTAssertEqual(state.status, .failed)
+                    XCTAssertNil(state.cycle.firstFailure?.retryAt)
+                    XCTAssertEqual(state.nextEvent?.dayKey, "2026-09-08")
+                }
+            }
+            let restarted = AppState(store: store, engine: engine, startScheduler: false, clock: { target.addingTimeInterval(14_000) })
+            restarted.reconcileSchedule(reason: "clock_changed")
+            XCTAssertEqual(restarted.nextEvent?.dayKey, "2026-09-08")
+            XCTAssertEqual(restarted.cycle.firstFailure?.attempts, 4)
+            restarted.reconcileSchedule(reason: "system_wake")
+            XCTAssertEqual(restarted.nextEvent?.dayKey, "2026-09-07")
+            XCTAssertEqual(restarted.nextEvent?.targetAt, target)
+            XCTAssertEqual(restarted.cycle.firstFailure?.attempts, 4)
+        }
+    }
+
+    @MainActor
+    func testAuthenticationFailureWaitsWithoutConsumingWindow() {
+        withStore { store in
+            let engine = ScheduleEngine(calendar: seoulCalendar())
+            let target = date(2026, 9, 7, 6, calendar: seoulCalendar())
+            let state = AppState(store: store, engine: engine, startScheduler: false, clock: { target })
             let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
             state.markScheduledWindowStarted(event)
-            state.handleTargetFailure(ClaudeServiceError.oauthRefreshUnavailable, event: event, at: target)
-            let original = state.cycle.firstFailure
+            state.handleTargetFailure(ClaudeServiceError.oauthRefreshFailed, event: event)
             XCTAssertEqual(state.cycle.handledWindows, 0)
-            XCTAssertEqual(state.nextEvent?.date, target.addingTimeInterval(30))
-            state.markScheduledWindowStarted(event)
-            state.handleTargetFailure(ClaudeServiceError.quotaRateLimited, event: event, at: target.addingTimeInterval(30))
-            XCTAssertEqual(state.cycle.firstFailure, original)
-            XCTAssertEqual(state.cycle.lastRecord?.status, .checking)
-
-            let restarted = AppState(store: store, engine: engine, startScheduler: false)
-            restarted.reconcileMissedWindows(at: target.addingTimeInterval(181))
-            XCTAssertEqual(restarted.cycle.handledWindows, 1)
-            XCTAssertEqual(restarted.cycle.lastRecord?.status, .failed)
-            XCTAssertEqual(restarted.cycle.lastRecord?.message, original?.message)
-            let terminal = restarted.cycle
-            restarted.reconcileMissedWindows(at: target.addingTimeInterval(182))
-            XCTAssertEqual(restarted.cycle, terminal)
-            XCTAssertEqual(terminal.nextResetAt, target.addingTimeInterval(5 * 3600))
-        }
-    }
-
-    @MainActor
-    func testTransientFailureAtRetryDeadlineClosesAsFailed() {
-        withStore { store in
-            let calendar = seoulCalendar()
-            let engine = ScheduleEngine(calendar: calendar)
-            let target = date(2026, 9, 7, 6, calendar: calendar)
-            store.saveSettings(ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false))
-            store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: target)))
-            let state = AppState(store: store, engine: engine, startScheduler: false)
-            let event = ScheduledEvent(date: target, targetAt: target, dayKey: engine.dayKey(for: target), windowNumber: 1)
-            state.markScheduledWindowStarted(event)
-            state.handleTargetFailure(ClaudeServiceError.quotaUnavailable, event: event, at: target.addingTimeInterval(151))
-            XCTAssertEqual(state.cycle.handledWindows, 1)
-            XCTAssertEqual(state.cycle.lastRecord?.status, .failed)
-            XCTAssertEqual(state.nextEvent?.windowNumber, 2)
+            XCTAssertEqual(state.cycle.nextResetAt, target)
+            XCTAssertNil(state.cycle.firstFailure?.retryAt)
+            XCTAssertEqual(state.status, .failed)
+            XCTAssertEqual(state.nextEvent?.dayKey, "2026-09-08")
         }
     }
 

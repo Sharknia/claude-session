@@ -7,24 +7,12 @@ struct ScheduledEvent: Equatable, Sendable {
     let windowNumber: Int
 }
 
-struct WarmupWindowTiming: Equatable, Sendable {
-    let targetAt: Date
-    let expiresAt: Date
-}
-
-enum WarmupWindowPosition: Equatable, Sendable {
-    case scheduled
-    case actionable
-    case missed
-}
-
 /// Pure date calculations for the MVP scheduler.
 ///
 /// This type deliberately does not own a timer or perform any I/O. Its caller asks
 /// for one event, schedules it, updates `DailyCycle`, and asks again.
 struct ScheduleEngine: Sendable {
     static let maximumWindowsPerDay = 3
-    static let windowTolerance: TimeInterval = 3 * 60
     static let quotaWindowDuration: TimeInterval = 5 * 60 * 60
     static let supportedHolidayYears = 2026...2027
 
@@ -80,123 +68,36 @@ struct ScheduleEngine: Sendable {
         return nil
     }
 
-    func timing(for targetAt: Date) -> WarmupWindowTiming {
-        WarmupWindowTiming(
-            targetAt: targetAt,
-            expiresAt: targetAt.addingTimeInterval(Self.windowTolerance)
-        )
-    }
-
-    func position(of targetAt: Date, at now: Date) -> WarmupWindowPosition {
-        let timing = timing(for: targetAt)
-        if now < timing.targetAt { return .scheduled }
-        if now <= timing.expiresAt { return .actionable }
-        return .missed
-    }
-
-    /// Calculates only the next scheduler event. A returned date is never in the past.
-    /// A reset whose +3 minute window has elapsed is abandoned rather than caught up.
+    /// 오늘의 미완료 작업 하나를 선택한다. 지연은 실행 자격을 만료시키지 않는다.
     func nextEvent(
         after now: Date,
         settings: ScheduleSettings,
         cycle: DailyCycle
     ) -> ScheduledEvent? {
-        let firstAlreadyHandled = cycle.dayKey == dayKey(for: now)
-            && cycle.handledWindows > 0
-        let freshFirst = firstAlreadyHandled
-            ? nextValidFirstWarmupAfterCurrentDay(now, settings: settings)
-            : nextFirstWarmupOnOrAfter(now, settings: settings)
-
-        if let resetEvent = nextResetEvent(after: now, settings: settings, cycle: cycle),
-           freshFirst == nil || resetEvent.targetAt < freshFirst! {
-            return resetEvent
+        let today = dayKey(for: now)
+        let sameDay = cycle.dayKey == today
+        let count = sameDay ? cycle.handledWindows : 0
+        if let first = firstWarmup(on: now, settings: settings), count < Self.maximumWindowsPerDay {
+            let target = count == 0 ? first : (cycle.nextResetAt ?? first)
+            let failure = sameDay ? cycle.firstFailure : nil
+            let paused = failure?.targetAt == target && failure?.retryAt == nil
+            if dayKey(for: target) == today, !paused {
+                let retryAt = failure?.targetAt == target ? failure?.retryAt : nil
+                return ScheduledEvent(
+                    date: max(now, first, target, retryAt ?? target), targetAt: target,
+                    dayKey: today, windowNumber: count + 1
+                )
+            }
         }
-
-        guard let first = freshFirst else { return nil }
-        return event(for: first, after: now, dayKey: dayKey(for: first), windowNumber: 1)
+        let tomorrow = calendar.date(byAdding: .day, value: 1, to: calendar.startOfDay(for: now))!
+        guard let first = nextValidFirstWarmup(after: tomorrow.addingTimeInterval(-1), settings: settings) else {
+            return nil
+        }
+        return ScheduledEvent(date: first, targetAt: first, dayKey: dayKey(for: first), windowNumber: 1)
     }
 
     func newCycle(startingAt firstWarmup: Date) -> DailyCycle {
         DailyCycle(dayKey: dayKey(for: firstWarmup))
-    }
-
-    private func nextResetEvent(
-        after now: Date,
-        settings: ScheduleSettings,
-        cycle: DailyCycle
-    ) -> ScheduledEvent? {
-        guard
-            let originDayKey = cycle.dayKey,
-            cycle.handledWindows > 0,
-            cycle.handledWindows < Self.maximumWindowsPerDay,
-            let resetAt = cycle.nextResetAt,
-            dayKey(for: resetAt) == originDayKey,
-            isHolidaySchedulingAllowed(resetAt, settings: settings),
-            position(of: resetAt, at: now) != .missed
-        else {
-            return nil
-        }
-
-        return event(
-            for: resetAt,
-            after: now,
-            dayKey: originDayKey,
-            windowNumber: cycle.handledWindows + 1
-        )
-    }
-
-    private func nextFirstWarmupOnOrAfter(_ now: Date, settings: ScheduleSettings) -> Date? {
-        guard !settings.weekdays.isEmpty else { return nil }
-
-        let today = calendar.startOfDay(for: now)
-        if let todayFirst = firstWarmup(on: today, settings: settings),
-           position(of: todayFirst, at: now) != .missed {
-            return todayFirst
-        }
-        return nextValidFirstWarmup(after: now, settings: settings)
-    }
-
-    private func isHolidaySchedulingAllowed(_ date: Date, settings: ScheduleSettings) -> Bool {
-        guard settings.excludeKoreanHolidays else { return true }
-        let year = calendar.component(.year, from: date)
-        return Self.supportedHolidayYears.contains(year) && !isKoreanHoliday(date)
-    }
-
-    private func nextValidFirstWarmupAfterCurrentDay(
-        _ now: Date,
-        settings: ScheduleSettings
-    ) -> Date? {
-        let startOfToday = calendar.startOfDay(for: now)
-        guard let startOfTomorrow = calendar.date(byAdding: .day, value: 1, to: startOfToday) else {
-            return nil
-        }
-        return nextValidFirstWarmup(after: startOfTomorrow.addingTimeInterval(-1), settings: settings)
-    }
-
-    private func event(
-        for targetAt: Date,
-        after now: Date,
-        dayKey: String,
-        windowNumber: Int
-    ) -> ScheduledEvent? {
-        switch position(of: targetAt, at: now) {
-        case .scheduled:
-            return ScheduledEvent(
-                date: targetAt,
-                targetAt: targetAt,
-                dayKey: dayKey,
-                windowNumber: windowNumber
-            )
-        case .actionable:
-            return ScheduledEvent(
-                date: now,
-                targetAt: targetAt,
-                dayKey: dayKey,
-                windowNumber: windowNumber
-            )
-        case .missed:
-            return nil
-        }
     }
 
     // Sources: Korea AeroSpace Administration's official almanacs:
