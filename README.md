@@ -37,6 +37,8 @@
 
 배포용 앱과 DMG는 Developer ID로 서명하고 Apple 공증을 거칩니다.
 
+유지보수용 절차와 승인·체크섬 기록은 [Keychain 검증 및 앱·DMG 공증 운영 절차](15_RELEASE_VERIFICATION.md)에 정리했습니다.
+
 ## 사용법
 
 1. 메뉴바에서 앱을 열고 **Claude 로그인**을 선택해 브라우저에서 계정을 연결합니다.
@@ -70,7 +72,7 @@
 - 예약 설정은 별도 버전 키에, 실행 기록은 `~/Library/Application Support/com.sharknia.ClaudeSessionWarmer/runtime-state.json`에 둡니다. 정상 백업·이전 원본·손상 원본도 같은 폴더에 보존합니다. 인증 토큰은 계속 Keychain에만 보관합니다. 운영 중 이 폴더나 잠금 파일을 삭제하지 마세요.
 - macOS에서 로그인 실행을 끈 뒤 예약 시각만 바꿔도 자동으로 다시 켜지지 않습니다. 캐시 비우기는 예약·실행 기록·인증을 초기화하지 않습니다.
 
-검증 명령은 `swift test`, `swift build -c release`, `python3 scripts/verify-execution.py`, `python3 scripts/verify-concurrent-storage.py`, `bash scripts/verify-scheduler.sh late 147`입니다. 단위 테스트와 타이머 검증은 메모리 설정을 사용합니다. 실제 제품 서명·Keychain·설치 검증은 별도의 격리 환경에서 수행합니다.
+검증 명령은 `swift test`, `swift build -c release`, `python3 scripts/verify-execution.py`, `python3 scripts/verify-concurrent-storage.py`, `bash scripts/verify-scheduler.sh late 147`입니다. 단위 테스트와 타이머 검증은 메모리 설정을 사용합니다. 서명된 Keychain 검증은 임시 항목을 사용합니다. 별도 Mac/사용자 환경의 설치 검증 여부는 운영 절차와 검증 결과에 구분해 기록합니다.
 
 개발 잔여물 정리는 `scripts/apply-cleanup-manifest.py`로 검토한 목록만 적용합니다. 기본 실행은 현재 앱 해시·프로세스·등록 항목·빈 전용 설정 도메인을 재확인하며, `--apply`를 붙였을 때만 정리합니다. 결과 JSON에 앱의 휴지통 위치와 설정 백업 경로를 기록합니다. 앱 복구는 해당 휴지통 항목을 원래 경로로 되돌리고, 설정 복구는 `defaults import <도메인> <백업 plist>`로 수행합니다. 운영 중인 앱과 귀속이 불분명한 일반 테스트 도메인은 정리 대상에서 제외합니다.
 
