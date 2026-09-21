@@ -1,13 +1,13 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.6-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.7-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 정해진 시각부터 Claude Code의 5시간 사용량 창을 준비하는 macOS 메뉴바 앱입니다. 업무 시작 전에 첫 창을 열고, 실제 리셋 시각에 맞춰 후속 창을 관리합니다.
 
-> 0.1.6은 잠금 중 인증 정보 접근과 실패 후 자동 복구를 보강합니다. 기존 앱 인증 정보는 새 저장소에서 재확인한 뒤 이전하며, 일시적인 접근 실패로 당일 예약을 포기하지 않습니다.
+> 0.1.7은 중복 실행 방지, 실행 기록의 영속 저장, 손상된 설정의 복구를 보강합니다. 일시적인 네트워크·인증 장애 뒤에도 당일 예약을 재확인합니다.
 
 ## 주요 기능
 
@@ -59,9 +59,9 @@
 - 앱은 Claude Code의 인증 정보와 별도로 계정을 연결합니다. 인증 정보는 앱 전용 macOS Data Protection Keychain에 저장하며, Mac 재시작 후 첫 로그인부터 접근할 수 있습니다.
 - Anthropic의 공식 앱이나 공식 승인된 제3자 OAuth 통합은 아닙니다. Claude의 인증 방식이나 서비스 정책 변경에 영향을 받을 수 있습니다.
 
-## 다음 버전에서 적용할 저장소 보호 (미배포)
+## 0.1.7의 실행·저장소 보호
 
-현재 개발 브랜치에만 적용한 동작이며, 공개된 0.1.6과 운영 설치본은 아직 바뀌지 않았습니다.
+0.1.7부터 적용하는 동작입니다. 0.1.6 이하 설치본에는 다음 보호가 없습니다.
 
 - 운영 앱은 `/Applications/ClaudeSessionWarmer.app` 한 곳에서 실행합니다. 다른 경로에서는 예약·로그인 등록·업데이트를 시작하지 않습니다. 같은 사용자의 중복 실행은 OS 파일 잠금으로 막습니다.
 - 0.1.6 이하의 구버전은 새 잠금을 따르지 않습니다. 전환 전에 구버전을 정상 종료하고 사용하지 않는 복사본을 정리해야 합니다. 새 앱이 구버전을 감지하면 후속 작업을 멈춥니다.
