@@ -6,6 +6,7 @@ mkdir -p "$SCHEDULER_VERIFY_DIR"
 swiftc -parse-as-library -swift-version 6 \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ExecutionOwnership.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/Models.swift" \
+  "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/AtomicStateFile.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/SettingsStore.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ScheduleEngine.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/WallClockTimer.swift" \

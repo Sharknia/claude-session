@@ -26,6 +26,7 @@ struct MenuContent: View {
     @State private var loginPreferenceChanged = false
     @State private var didSave = false
     @State private var confirmResend = false
+    @State private var confirmRecordRecovery = false
 
     private let weekdays = [
         (1, "일"), (2, "월"), (3, "화"), (4, "수"), (5, "목"), (6, "금"), (7, "토")
@@ -43,9 +44,10 @@ struct MenuContent: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             header
+            storageRecovery
             Divider()
             scheduleSettings
-                .disabled(state.operationBlockReason != nil)
+                .disabled(!state.canEditSettings)
             Divider()
             actions
                 .disabled(state.operationBlockReason != nil)
@@ -67,6 +69,33 @@ struct MenuContent: View {
         .frame(width: 372)
         .onAppear {
             state.refreshSilently()
+        }
+    }
+
+    @ViewBuilder
+    private var storageRecovery: some View {
+        if let issue = state.storageIssue {
+            if issue.area == .settings, issue.kind == .corrupt {
+                Text("아래 예약 초안을 저장하면 손상 원본을 보존하고 설정을 복구합니다.")
+                    .font(.caption)
+            }
+            if issue.kind != .unsupported {
+                HStack {
+                    Button("다시 읽기") { state.reloadStoredState() }
+                    if state.canRecoverRuntime {
+                        Button("실행 기록 복구…") { confirmRecordRecovery = true }
+                            .alert("손상된 실행 기록을 복구할까요?", isPresented: $confirmRecordRecovery) {
+                                Button("취소", role: .cancel) {}
+                                Button("원본 보존 후 복구") { state.recoverRuntime() }
+                            } message: {
+                                Text("기존 파일을 보존합니다. 마지막 전송 결과가 불확실하므로 오늘 자동 워밍을 중지하고 미확인 전송 상태를 유지합니다. 복구 후 상태 확인 또는 재전송을 선택할 수 있습니다.")
+                            }
+                    }
+                }.disabled(state.hasActiveOperation)
+            }
+            if let directory = state.storageDirectory {
+                Button("기록 폴더 열기") { NSWorkspace.shared.open(directory) }
+            }
         }
     }
 
@@ -94,7 +123,7 @@ struct MenuContent: View {
 
             HStack(spacing: 8) {
                 metricCard(
-                    value: "\(state.handledWindowsToday)/3",
+                    value: state.hasReadableCycle ? "\(state.handledWindowsToday)/3" : "확인 필요",
                     label: "오늘 확인한 창",
                     progress: Double(state.handledWindowsToday) / 3
                 )
@@ -201,7 +230,7 @@ struct MenuContent: View {
                 Spacer()
                 Button("저장") { saveDraft() }
                     .buttonStyle(.borderedProminent)
-                    .disabled(!hasDraftChanges || draftWeekdays.isEmpty)
+                    .disabled((!hasDraftChanges && state.storageIssue?.area != .settings) || draftWeekdays.isEmpty)
             }
         }
     }

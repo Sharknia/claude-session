@@ -23,6 +23,7 @@ final class SettingsStoreTests: XCTestCase {
     func testLegacyCyclePreservesCountAndOnlyClearsConfirmedTransmission() throws {
         let target = Date(timeIntervalSince1970: 1_800_000_000)
         for status in [WarmupStatus.succeeded, .satisfied, .failed, .checking, .missed] {
+            defaults = MemoryDefaults()
             let legacy: [String: Any] = [
                 "dayKey": "2027-01-15", "handledWindows": 2,
                 "nextResetAt": target.addingTimeInterval(18_000).timeIntervalSinceReferenceDate,

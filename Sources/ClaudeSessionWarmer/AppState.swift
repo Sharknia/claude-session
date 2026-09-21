@@ -56,14 +56,7 @@ final class AppState: ObservableObject {
         warmClaude: (@Sendable (URL, String) async throws -> Void)? = nil,
         confirmationSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
-        var savedCycle = store.loadDailyCycle()
-        // 구버전 횟수는 당일 상한으로 보존한다. 확인된 성공의 전송 표식만 정리한다.
-        if savedCycle.lastWarmupAttemptAt == nil,
-           savedCycle.lastRecord?.status == .succeeded || savedCycle.lastRecord?.status == .satisfied {
-            savedCycle.lastConfirmedResetAt = savedCycle.lastConfirmedResetAt ?? savedCycle.nextResetAt
-            savedCycle.lastWarmupTargetAt = nil
-            savedCycle.lastWarmupAttemptAt = nil
-        }
+        let savedCycle = store.loadDailyCycle()
         self.executionCheck = executionCheck
         self.store = store
         self.engine = engine
@@ -93,12 +86,13 @@ final class AppState: ObservableObject {
             "previous_status": savedCycle.lastRecord.map { String(describing: $0.status) } ?? "none"
         ])
 
-        if startScheduler, operationBlockReason == nil {
+        if startScheduler {
             lifecycleMonitor = LifecycleMonitor { [weak self] reason in
                 Task { @MainActor [weak self] in
                     self?.reconcileSchedule(reason: reason)
                 }
             }
+            if operationBlockReason != nil { return }
             reconcileSchedule(reason: "startup")
             // 예약 직전까지 잘못된 CLI·인증 상태를 숨기지 않는다. 워밍은 하지 않는다.
             if let nextEvent, nextEvent.date > clock().addingTimeInterval(30) {
@@ -109,14 +103,15 @@ final class AppState: ObservableObject {
 
     @discardableResult
     func refreshExecutionPermission() -> Bool {
-        if operationBlockReason == nil, let reason = executionCheck() {
+        if operationBlockReason == nil { _ = store.validateCurrentRecords() }
+        if operationBlockReason == nil, let reason = executionCheck() ?? store.issue?.message {
             operationBlockReason = reason
             scheduleRevision += 1
             cancelScheduledTimer()
             nextEvent = nil
             status = .failed
             statusMessage = reason
-            diagnosticLogCritical("app.execution_conflict")
+            diagnosticLogCritical("app.operations_blocked", ["source": store.issue == nil ? "execution" : "storage"])
         }
         return operationBlockReason == nil
     }
@@ -138,25 +133,57 @@ final class AppState: ObservableObject {
         excludeKoreanHolidays: Bool,
         launchAtLogin: Bool? = nil
     ) -> Bool {
-        guard refreshExecutionPermission(), !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }) else {
-            return false
+        guard executionCheck() == nil, firstWarmupDate.timeIntervalSince1970.isFinite,
+              !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }) else { return false }
+        let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: firstWarmupDate)
+        let candidate = ScheduleSettings(firstWarmupMinutes: (components.hour ?? 0) * 60 + (components.minute ?? 0),
+                                         weekdays: weekdays, excludeKoreanHolidays: excludeKoreanHolidays,
+                                         launchAtLogin: settings.launchAtLogin)
+        guard (try? candidate.validate()) != nil else { return false }
+        if store.canRepairSettings {
+            guard !hasActiveOperation else { return false }
+            _ = store.repairSettings(candidate)
+            adoptStoredState()
+            guard operationBlockReason == nil else { return false }
+        } else {
+            guard refreshExecutionPermission() else { return false }
+            guard store.saveSettings(candidate) else { _ = refreshExecutionPermission(); return false }
+            settings = candidate
         }
-        let components = Calendar.autoupdatingCurrent.dateComponents(
-            [.hour, .minute],
-            from: firstWarmupDate
-        )
-        settings.firstWarmupMinutes = min(
-            max((components.hour ?? 0) * 60 + (components.minute ?? 0), 0),
-            23 * 60 + 59
-        )
-        settings.weekdays = weekdays
-        settings.excludeKoreanHolidays = excludeKoreanHolidays
         if let launchAtLogin { applyLaunchAtLogin(launchAtLogin) }
         else { syncLaunchAtLoginStatus() }
-        store.saveSettings(settings)
+        guard operationBlockReason == nil else { return false }
         scheduleRevision += 1
         scheduleNext(reason: "settings_changed")
         return true
+    }
+
+    var storageIssue: StorageIssue? { store.issue }
+    var canEditSettings: Bool { operationBlockReason == nil || store.canRepairSettings }
+    var canRecoverRuntime: Bool { store.canRecoverRuntime }
+    var hasReadableCycle: Bool { store.hasReadableCycle && cycle.recoveryHoldDayKey != engine.dayKey(for: clock()) }
+    var storageDirectory: URL? { store.directory }
+
+    func reloadStoredState() {
+        guard !hasActiveOperation, executionCheck() == nil, store.issue != nil else { return }
+        _ = store.reload()
+        adoptStoredState()
+    }
+
+    func recoverRuntime() {
+        guard !hasActiveOperation, executionCheck() == nil, store.canRecoverRuntime else { return }
+        let now = clock()
+        _ = store.recoverRuntime(at: now, dayKey: engine.dayKey(for: now))
+        adoptStoredState()
+    }
+
+    private func adoptStoredState() {
+        settings = store.loadSettings()
+        cycle = store.loadDailyCycle()
+        status = cycle.lastRecord?.status ?? .idle
+        statusMessage = cycle.lastRecord?.displayMessage ?? "대기 중"
+        operationBlockReason = nil
+        if refreshExecutionPermission() { reconcileSchedule(reason: "storage_recovered") }
     }
 
     private func applyLaunchAtLogin(_ enabled: Bool) {
@@ -171,7 +198,7 @@ final class AppState: ObservableObject {
             }
             let serviceStatus = SMAppService.mainApp.status
             settings.launchAtLogin = serviceStatus == .enabled
-            store.saveSettings(settings)
+            if !store.saveSettings(settings) { _ = refreshExecutionPermission(); return }
             if enabled, serviceStatus == .requiresApproval {
                 record(.failed, message: "시스템 설정의 로그인 항목에서 앱을 허용해 주세요.")
                 persistCycle()
@@ -266,7 +293,7 @@ final class AppState: ObservableObject {
         if allowResend {
             cycle.lastWarmupTargetAt = nil
             cycle.lastWarmupAttemptAt = nil
-            persistCycle()
+            guard persistCycle() else { return }
         }
         let now = clock()
         var candidateCycle = cycle
@@ -275,7 +302,7 @@ final class AppState: ObservableObject {
         let event = candidate.flatMap { $0.date <= now ? $0 : nil }
         if let event {
             cycle.firstFailure = nil
-            markScheduledWindowStarted(event)
+            guard markScheduledWindowStarted(event) else { return }
         }
         isWorking = true
         isManualWarmupRunning = true
@@ -299,6 +326,7 @@ final class AppState: ObservableObject {
                     persistCycle()
                 }
             } catch {
+                guard operationBlockReason == nil else { return }
                 if error as? AppStateError == .scheduleChanged {
                     scheduleNext(reason: "operation_invalidated")
                 } else if let event {
@@ -316,7 +344,10 @@ final class AppState: ObservableObject {
     @discardableResult
     private func persistCycle() -> Bool {
         guard operationBlockReason == nil else { return false }
-        store.saveDailyCycle(cycle)
+        guard store.saveDailyCycle(cycle) else {
+            _ = refreshExecutionPermission()
+            return false
+        }
         return true
     }
 
@@ -325,7 +356,7 @@ final class AppState: ObservableObject {
         let enabled = SMAppService.mainApp.status == .enabled
         if settings.launchAtLogin != enabled {
             settings.launchAtLogin = enabled
-            store.saveSettings(settings)
+            if !store.saveSettings(settings) { _ = refreshExecutionPermission(); return }
         }
     }
 
@@ -364,11 +395,11 @@ final class AppState: ObservableObject {
         scheduleRevision += 1
         if ["screen_unlocked", "credential_available"].contains(reason),
            cycle.firstFailure?.keychainAccessFailure == true {
-            cycle.firstFailure?.retryAt = clock()
+            cycle.firstFailure?.retryAt = max(clock(), cycle.firstFailure!.targetAt)
             persistCycle()
         } else if ["system_wake", "startup", "login_completed", "screen_unlocked"].contains(reason),
            cycle.firstFailure != nil, cycle.firstFailure?.retryAt == nil {
-            cycle.firstFailure?.retryAt = clock()
+            cycle.firstFailure?.retryAt = max(clock(), cycle.firstFailure!.targetAt)
             persistCycle()
         }
         pendingScheduleReasons.insert(reason)
@@ -402,6 +433,7 @@ final class AppState: ObservableObject {
     }
 
     func arm(_ event: ScheduledEvent, at date: Date, reason: String = "scheduled") {
+        guard operationBlockReason == nil else { return }
         cancelScheduledTimer()
         let id = UUID()
         scheduledTimerID = id
@@ -482,7 +514,7 @@ final class AppState: ObservableObject {
     }
 
     private func performScheduledWarmup(for event: ScheduledEvent, timerID: UUID?) {
-        markScheduledWindowStarted(event)
+        guard markScheduledWindowStarted(event) else { return }
 
         isWorking = true
         status = .checking
@@ -550,7 +582,7 @@ final class AppState: ObservableObject {
             cycle.lastWarmupTargetAt = targetAt
             cycle.lastWarmupAttemptAt = clock()
             record(.warming, message: "세션을 활성화하고 있습니다.")
-            persistCycle()
+            guard persistCycle() else { throw AppStateError.scheduleChanged }
             let warmupOperationID = UUID().uuidString
             var metadata = event.map(scheduledMetadata) ?? [:]
             metadata["context"] = context
@@ -577,7 +609,7 @@ final class AppState: ObservableObject {
         }
 
         record(.checking, message: "세션 활성화를 확인하고 있습니다.")
-        persistCycle()
+        guard persistCycle() else { throw AppStateError.scheduleChanged }
         var lastError = warmupError
         let confirmationDeadline = clock().addingTimeInterval(60)
         for seconds in [5, 10, 15, 15, 15] {
@@ -590,7 +622,7 @@ final class AppState: ObservableObject {
                 inspection = try await inspectClaude(operationID)
                 guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
             } catch {
-                guard Self.shouldRetryScheduledFailure(error) else { throw error }
+                guard operationBlockReason == nil, Self.shouldRetryScheduledFailure(error) else { throw error }
                 lastError = error
                 continue
             }
@@ -607,8 +639,7 @@ final class AppState: ObservableObject {
         guard quota.active, let resetsAt = quota.resetsAt, resetsAt > clock() else { return false }
         cycle.lastWarmupTargetAt = nil
         cycle.lastWarmupAttemptAt = nil
-        persistCycle()
-        return true
+        return persistCycle()
     }
 
     private func eventIsCurrent(_ event: ScheduledEvent, at now: Date) -> Bool {
@@ -618,7 +649,9 @@ final class AppState: ObservableObject {
         return candidate?.targetAt == event.targetAt && candidate?.windowNumber == event.windowNumber
     }
 
-    func markScheduledWindowStarted(_ event: ScheduledEvent) {
+    @discardableResult
+    func markScheduledWindowStarted(_ event: ScheduledEvent) -> Bool {
+        guard operationBlockReason == nil else { return false }
         if cycle.dayKey != event.dayKey {
             let pendingTarget = cycle.lastWarmupTargetAt
             let pendingAttempt = cycle.lastWarmupAttemptAt
@@ -629,7 +662,7 @@ final class AppState: ObservableObject {
         if cycle.firstFailure?.targetAt != event.targetAt { cycle.firstFailure = nil }
         cycle.nextResetAt = event.targetAt
         record(.checking, message: "\(event.windowNumber)번째 창 확인 시작")
-        persistCycle()
+        return persistCycle()
     }
 
     private func complete(
@@ -653,7 +686,7 @@ final class AppState: ObservableObject {
             ? quota.resetsAt
             : nil
         record(completedStatus, message: message)
-        persistCycle()
+        guard persistCycle() else { return }
         var metadata = scheduledMetadata(event)
         metadata["outcome"] = completedStatus == .succeeded ? "warmed" : "already_active"
         metadata["actual_reset_at"] = diagnosticDate(quota.resetsAt)
@@ -697,7 +730,7 @@ final class AppState: ObservableObject {
                 targetAt: event.targetAt, message: "워밍 확인 실패: \(error.localizedDescription)"
             )
         }
-        let attempts = (cycle.firstFailure?.attempts ?? 0) + 1
+        let attempts = min(cycle.firstFailure?.attempts ?? 0, Int.max - 1) + 1
         cycle.firstFailure?.attempts = attempts
         let keychainAccessFailure = Self.isRecoverableKeychainFailure(error)
         cycle.firstFailure?.keychainAccessFailure = keychainAccessFailure
@@ -712,7 +745,7 @@ final class AppState: ObservableObject {
             : hasUnconfirmedWarmup
                 ? "전송 결과 미확인: 다시 전송하지 않습니다. 상태 확인 또는 재전송을 선택해 주세요."
                 : "\(cycle.firstFailure!.message) · 복귀 또는 지금 워밍으로 재시도할 수 있습니다.")
-        persistCycle()
+        guard persistCycle() else { return }
         var metadata = scheduledMetadata(event)
         metadata["attempts"] = "\(attempts)"
         metadata["retry_at"] = diagnosticDate(cycle.firstFailure?.retryAt)
