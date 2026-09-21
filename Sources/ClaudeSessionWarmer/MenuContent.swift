@@ -23,6 +23,7 @@ struct MenuContent: View {
     @State private var draftWeekdays: Set<Int>
     @State private var draftExcludeHolidays: Bool
     @State private var draftLaunchAtLogin: Bool
+    @State private var loginPreferenceChanged = false
     @State private var didSave = false
     @State private var confirmResend = false
 
@@ -44,12 +45,14 @@ struct MenuContent: View {
             header
             Divider()
             scheduleSettings
+                .disabled(state.operationBlockReason != nil)
             Divider()
             actions
+                .disabled(state.operationBlockReason != nil)
             if state.hasUnconfirmedWarmup {
                 Button("미확인 전송을 해제하고 다시 워밍…") { confirmResend = true }
                     .font(.caption)
-                    .disabled(state.isWorking)
+                    .disabled(state.hasActiveOperation || state.operationBlockReason != nil)
                     .alert("이전 요청이 이미 전송됐을 수 있습니다.", isPresented: $confirmResend) {
                         Button("취소", role: .cancel) {}
                         Button("확인 후 다시 전송") { state.manualWarmup(allowResend: true) }
@@ -74,6 +77,7 @@ struct MenuContent: View {
                     .font(.headline)
                 Spacer()
                 connectionControl
+                    .disabled(state.operationBlockReason != nil)
             }
 
             HStack(spacing: 9) {
@@ -81,7 +85,7 @@ struct MenuContent: View {
                     .foregroundStyle(statusColor)
                 Text(state.statusMessage)
                     .font(.subheadline)
-                    .lineLimit(2)
+                    .lineLimit(state.operationBlockReason == nil ? 2 : nil)
                 Spacer(minLength: 0)
             }
             .padding(10)
@@ -178,6 +182,7 @@ struct MenuContent: View {
                     get: { draftLaunchAtLogin },
                     set: {
                         draftLaunchAtLogin = $0
+                        loginPreferenceChanged = true
                         didSave = false
                     }
                 )
@@ -317,13 +322,14 @@ struct MenuContent: View {
             firstWarmupDate: draftTime,
             weekdays: draftWeekdays,
             excludeKoreanHolidays: draftExcludeHolidays,
-            launchAtLogin: draftLaunchAtLogin
+            launchAtLogin: loginPreferenceChanged ? draftLaunchAtLogin : nil
         ) else { return }
 
         draftTime = state.firstWarmupDate
         draftWeekdays = state.settings.weekdays
         draftExcludeHolidays = state.settings.excludeKoreanHolidays
         draftLaunchAtLogin = state.settings.launchAtLogin
+        loginPreferenceChanged = false
         didSave = true
     }
 

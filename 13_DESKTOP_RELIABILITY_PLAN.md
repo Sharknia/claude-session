@@ -159,3 +159,4 @@ T1의 시작 차단과 T3·T4의 저장소 준비 판정이 모두 적용되기 
 - T0: 최신 `origin/dev`를 조회하고 같은 커밋에서 새 브랜치 생성. 기존 미배포 수정은 별도 선행 커밋으로 보존. 운영 설정의 `scheduleSettings`, `dailyCycle`, `quotaCache`만 `.build/reliability-baseline/operational-preferences.plist`에 백업했다. 인증 비밀 값은 포함하지 않았다. 이 경로는 Git에 올리지 않는다.
 - 선행 변경 검증: 이전 점검의 테스트 100개 및 release 빌드 결과는 12 문서에 기록되어 있다. 이후 회귀 검증은 테스트 설정 격리를 적용한 뒤 재실행한다.
 - T5 선행 격리: 단위 테스트와 실제 타이머 검증의 UserDefaults를 메모리 저장소로 교체. `swift test` 100개 통과. Preferences 1,917개에 신규·내용 변경 0건. 실제 타이머 지연 147초 재현에서 조회 2회, 가짜 워밍 1회, 성공 기록 확인. 기존 잔여물 정리는 아직 수행하지 않았다.
+- T1・T2: `/Applications/ClaudeSessionWarmer.app`만 운영 상태와 업데이트를 생성하도록 진입점 변경. 사용자별 `flock`을 앱 수명 동안 유지하고 직접 실행된 구버전도 탐지한다. 충돌은 인증 조회 전후와 전송 직전에 확인하며 이후 예약·쓰기·수동 작업을 중지한다. 로그인 항목 토글을 실제로 편집했을 때만 등록 여부를 바꾼다. 단위 테스트 104개와 release 빌드 통과. `python3 scripts/verify-execution.py`에서 동시 시작 10회, 다른 경로 직접 실행, SIGKILL 후 재획득, CLOEXEC, 가짜 구버전 직접 실행 탐지 통과. 서로 다른 실제 macOS 계정·서명된 설치본 검증은 아직 미수행이다.

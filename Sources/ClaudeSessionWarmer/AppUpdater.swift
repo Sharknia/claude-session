@@ -23,7 +23,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
             Task { @MainActor [weak self] in self?.resumePendingInstall() }
         }.store(in: &observations)
         // SwiftPM 테스트·CLI에는 배포용 Info.plist가 없으므로 업데이트 UI를 띄우지 않는다.
-        guard Bundle.main.bundleURL.pathExtension == "app" else { return }
+        guard InstallationPolicy.isCanonicalApp(Bundle.main.bundleURL) else { return }
         let userDriver = OneClickUpdateUserDriver(hostBundle: .main)
         let updater = SPUUpdater(hostBundle: .main, applicationBundle: .main, userDriver: userDriver, delegate: self)
         self.userDriver = userDriver

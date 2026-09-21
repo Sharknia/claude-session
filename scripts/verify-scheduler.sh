@@ -4,6 +4,7 @@ SCHEDULER_ROOT="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 SCHEDULER_VERIFY_DIR="$SCHEDULER_ROOT/.build/scheduler-verification"
 mkdir -p "$SCHEDULER_VERIFY_DIR"
 swiftc -parse-as-library -swift-version 6 \
+  "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ExecutionOwnership.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/Models.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/SettingsStore.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ScheduleEngine.swift" \
