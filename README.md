@@ -1,13 +1,13 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.6-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.7-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 정해진 시각부터 Claude Code의 5시간 사용량 창을 준비하는 macOS 메뉴바 앱입니다. 업무 시작 전에 첫 창을 열고, 실제 리셋 시각에 맞춰 후속 창을 관리합니다.
 
-> 0.1.6은 잠금 중 인증 정보 접근과 실패 후 자동 복구를 보강합니다. 기존 앱 인증 정보는 새 저장소에서 재확인한 뒤 이전하며, 일시적인 접근 실패로 당일 예약을 포기하지 않습니다.
+> 0.1.7은 중복 실행 방지, 실행 기록의 영속 저장, 손상된 설정의 복구를 보강합니다. 일시적인 네트워크·인증 장애 뒤에도 당일 예약을 재확인합니다.
 
 ## 주요 기능
 
@@ -58,6 +58,25 @@
 - 구버전에서 업데이트한 당일에는 기존 처리 수를 상한으로 보존합니다. 새 집계는 다음 실행일부터 적용돼 도입 당일 목표가 조기 종료될 수 있습니다.
 - 앱은 Claude Code의 인증 정보와 별도로 계정을 연결합니다. 인증 정보는 앱 전용 macOS Data Protection Keychain에 저장하며, Mac 재시작 후 첫 로그인부터 접근할 수 있습니다.
 - Anthropic의 공식 앱이나 공식 승인된 제3자 OAuth 통합은 아닙니다. Claude의 인증 방식이나 서비스 정책 변경에 영향을 받을 수 있습니다.
+
+## 0.1.7의 실행·저장소 보호
+
+0.1.7부터 적용하는 동작입니다. 0.1.6 이하 설치본에는 다음 보호가 없습니다.
+
+- 운영 앱은 `/Applications/ClaudeSessionWarmer.app` 한 곳에서 실행합니다. 다른 경로에서는 예약·로그인 등록·업데이트를 시작하지 않습니다. 같은 사용자의 중복 실행은 OS 파일 잠금으로 막습니다.
+- 0.1.6 이하의 구버전은 새 잠금을 따르지 않습니다. 전환 전에 구버전을 정상 종료하고 사용하지 않는 복사본을 정리해야 합니다. 새 앱이 구버전을 감지하면 후속 작업을 멈춥니다.
+- 손상된 예약 설정은 원본을 남기고 메뉴의 초안을 저장해 복구합니다. 손상된 실행 기록은 **실행 기록 복구…**에서 명시적으로 복구합니다. 복구 당일에는 자동 워밍을 중지하며, 마지막 전송이 불확실하면 상태 확인이나 재전송 여부를 따로 선택합니다.
+- 더 새로운 저장 형식은 덮어쓰지 않습니다. 호환되는 앱으로 업데이트해야 합니다. 저장 장치의 일시 오류는 **다시 읽기**로 재확인할 수 있습니다.
+- 예약 설정은 별도 버전 키에, 실행 기록은 `~/Library/Application Support/com.sharknia.ClaudeSessionWarmer/runtime-state.json`에 둡니다. 정상 백업·이전 원본·손상 원본도 같은 폴더에 보존합니다. 인증 토큰은 계속 Keychain에만 보관합니다. 운영 중 이 폴더나 잠금 파일을 삭제하지 마세요.
+- macOS에서 로그인 실행을 끈 뒤 예약 시각만 바꿔도 자동으로 다시 켜지지 않습니다. 캐시 비우기는 예약·실행 기록·인증을 초기화하지 않습니다.
+
+검증 명령은 `swift test`, `swift build -c release`, `python3 scripts/verify-execution.py`, `python3 scripts/verify-concurrent-storage.py`, `bash scripts/verify-scheduler.sh late 147`입니다. 단위 테스트와 타이머 검증은 메모리 설정을 사용합니다. 실제 제품 서명·Keychain·설치 검증은 별도의 격리 환경에서 수행합니다.
+
+개발 잔여물 정리는 `scripts/apply-cleanup-manifest.py`로 검토한 목록만 적용합니다. 기본 실행은 현재 앱 해시·프로세스·등록 항목·빈 전용 설정 도메인을 재확인하며, `--apply`를 붙였을 때만 정리합니다. 결과 JSON에 앱의 휴지통 위치와 설정 백업 경로를 기록합니다. 앱 복구는 해당 휴지통 항목을 원래 경로로 되돌리고, 설정 복구는 `defaults import <도메인> <백업 plist>`로 수행합니다. 운영 중인 앱과 귀속이 불분명한 일반 테스트 도메인은 정리 대상에서 제외합니다.
+
+메뉴 복구 화면은 `bash scripts/preview-recovery-menu.sh settings` (`runtime`, `future`도 지원)로 확인할 수 있습니다. 이 창의 설정·조회·로그인·워밍은 모두 시험용이며 운영 계정을 사용하지 않습니다. 상세 검증 결과와 아직 필요한 설치 환경은 [안정화 검증 결과](14_RELIABILITY_ACCEPTANCE.md)에 기록했습니다.
+
+Keychain 검증은 `bash scripts/verify-warmup.sh --storage-probe`로 분리된 임시 항목만 사용합니다. 실제 계정으로 확인하려면 `--keychain-only` 또는 `--warmup`을 명시해야 하며, 다른 제품 인스턴스가 실행 중이면 계정에 접근하지 않습니다. 인수 없는 실행은 워밍하지 않고 종료합니다.
 
 ## 라이선스
 

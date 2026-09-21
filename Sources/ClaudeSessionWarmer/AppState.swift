@@ -23,7 +23,11 @@ final class AppState: ObservableObject {
     @Published private(set) var statusMessage: String
     @Published private(set) var isWorking = false
     @Published private(set) var isManualWarmupRunning = false
+    @Published private(set) var isSilentRefreshRunning = false
     @Published private(set) var connectionState: ClaudeConnectionState = .disconnected
+
+    @Published private(set) var operationBlockReason: String?
+    private let executionCheck: @MainActor () -> String?
 
     private let store: SettingsStore
     private let engine: ScheduleEngine
@@ -31,6 +35,7 @@ final class AppState: ObservableObject {
     private let clock: @Sendable () -> Date
     private let confirmationSleep: @Sendable (Duration) async throws -> Void
     private let inspectClaude: @Sendable (String) async throws -> Inspection
+    private let loginClaude: @Sendable () async throws -> Inspection
     private let warmClaude: @Sendable (URL, String) async throws -> Void
     private var lifecycleMonitor: LifecycleMonitor?
     private var timer: WallClockTimer?
@@ -38,32 +43,30 @@ final class AppState: ObservableObject {
     private var needsFreshSchedule = false
     private var pendingScheduleReasons: Set<String> = []
     private var scheduleRevision = 0
-    private var isSilentRefreshRunning = false
     private var lastSilentRefreshAt: Date?
+
+    var hasActiveOperation: Bool { isWorking || isSilentRefreshRunning }
 
     init(
         store: SettingsStore = SettingsStore(),
         engine: ScheduleEngine = ScheduleEngine(),
         startScheduler: Bool = true,
+        executionCheck: @escaping @MainActor () -> String? = { nil },
         clock: @escaping @Sendable () -> Date = { Date() },
         inspectClaude: (@Sendable (String) async throws -> Inspection)? = nil,
+        loginClaude: (@Sendable () async throws -> Inspection)? = nil,
         warmClaude: (@Sendable (URL, String) async throws -> Void)? = nil,
         confirmationSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
-        var savedCycle = store.loadDailyCycle()
-        // 구버전 횟수는 당일 상한으로 보존한다. 확인된 성공의 전송 표식만 정리한다.
-        if savedCycle.lastWarmupAttemptAt == nil,
-           savedCycle.lastRecord?.status == .succeeded || savedCycle.lastRecord?.status == .satisfied {
-            savedCycle.lastConfirmedResetAt = savedCycle.lastConfirmedResetAt ?? savedCycle.nextResetAt
-            savedCycle.lastWarmupTargetAt = nil
-            savedCycle.lastWarmupAttemptAt = nil
-        }
+        let savedCycle = store.loadDailyCycle()
+        self.executionCheck = executionCheck
         self.store = store
         self.engine = engine
         self.schedulerEnabled = startScheduler
         self.clock = clock
         self.confirmationSleep = confirmationSleep
         self.inspectClaude = inspectClaude ?? { try await Self.inspectManagedClaude(operationID: $0) }
+        self.loginClaude = loginClaude ?? { try await Self.loginManagedClaude() }
         self.warmClaude = warmClaude ?? { try await Self.runManagedWarmup(cliURL: $0, operationID: $1) }
         settings = store.loadSettings()
         cycle = savedCycle
@@ -74,7 +77,7 @@ final class AppState: ObservableObject {
             connectionState = .connected
             lastSilentRefreshAt = cache.fetchedAt
         }
-        syncLaunchAtLoginStatus()
+        if refreshExecutionPermission() { syncLaunchAtLoginStatus() }
         diagnosticLogCritical("app.started", [
             "pid": "\(ProcessInfo.processInfo.processIdentifier)",
             "app_version": Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development",
@@ -92,8 +95,28 @@ final class AppState: ObservableObject {
                     self?.reconcileSchedule(reason: reason)
                 }
             }
+            if operationBlockReason != nil { return }
             reconcileSchedule(reason: "startup")
+            // 예약 직전까지 잘못된 CLI·인증 상태를 숨기지 않는다. 워밍은 하지 않는다.
+            if let nextEvent, nextEvent.date > clock().addingTimeInterval(30) {
+                refreshSilently(force: true)
+            }
         }
+    }
+
+    @discardableResult
+    func refreshExecutionPermission() -> Bool {
+        if operationBlockReason == nil { _ = store.validateCurrentRecords() }
+        if operationBlockReason == nil, let reason = executionCheck() ?? store.issue?.message {
+            operationBlockReason = reason
+            scheduleRevision += 1
+            cancelScheduledTimer()
+            nextEvent = nil
+            status = .failed
+            statusMessage = reason
+            diagnosticLogCritical("app.operations_blocked", ["source": store.issue == nil ? "execution" : "storage"])
+        }
+        return operationBlockReason == nil
     }
 
     var firstWarmupDate: Date {
@@ -111,29 +134,64 @@ final class AppState: ObservableObject {
         firstWarmupDate: Date,
         weekdays: Set<Int>,
         excludeKoreanHolidays: Bool,
-        launchAtLogin: Bool
+        launchAtLogin: Bool? = nil
     ) -> Bool {
-        guard !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }) else {
-            return false
+        guard executionCheck() == nil, firstWarmupDate.timeIntervalSince1970.isFinite,
+              !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }) else { return false }
+        let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: firstWarmupDate)
+        let candidate = ScheduleSettings(firstWarmupMinutes: (components.hour ?? 0) * 60 + (components.minute ?? 0),
+                                         weekdays: weekdays, excludeKoreanHolidays: excludeKoreanHolidays,
+                                         launchAtLogin: settings.launchAtLogin)
+        guard (try? candidate.validate()) != nil else { return false }
+        if store.canRepairSettings {
+            guard !hasActiveOperation else { return false }
+            _ = store.repairSettings(candidate)
+            adoptStoredState()
+            guard operationBlockReason == nil else { return false }
+        } else {
+            guard refreshExecutionPermission() else { return false }
+            guard store.saveSettings(candidate) else { _ = refreshExecutionPermission(); return false }
+            settings = candidate
         }
-        let components = Calendar.autoupdatingCurrent.dateComponents(
-            [.hour, .minute],
-            from: firstWarmupDate
-        )
-        settings.firstWarmupMinutes = min(
-            max((components.hour ?? 0) * 60 + (components.minute ?? 0), 0),
-            23 * 60 + 59
-        )
-        settings.weekdays = weekdays
-        settings.excludeKoreanHolidays = excludeKoreanHolidays
-        applyLaunchAtLogin(launchAtLogin)
-        store.saveSettings(settings)
+        if let launchAtLogin { applyLaunchAtLogin(launchAtLogin) }
+        else { syncLaunchAtLoginStatus() }
+        guard operationBlockReason == nil else { return false }
         scheduleRevision += 1
         scheduleNext(reason: "settings_changed")
         return true
     }
 
+    var storageIssue: StorageIssue? { store.issue }
+    var canEditSettings: Bool { operationBlockReason == nil || store.canRepairSettings }
+    var canRecoverRuntime: Bool { store.canRecoverRuntime }
+    var isRecoveryPausedToday: Bool { cycle.recoveryHoldDayKey == engine.dayKey(for: clock()) }
+    var hasReadableCycle: Bool { store.hasReadableCycle && !isRecoveryPausedToday }
+    var storageDirectory: URL? { store.directory }
+
+    func reloadStoredState() {
+        guard !hasActiveOperation, executionCheck() == nil, store.issue != nil else { return }
+        _ = store.reload()
+        adoptStoredState()
+    }
+
+    func recoverRuntime() {
+        guard !hasActiveOperation, executionCheck() == nil, store.canRecoverRuntime else { return }
+        let now = clock()
+        _ = store.recoverRuntime(at: now, dayKey: engine.dayKey(for: now))
+        adoptStoredState()
+    }
+
+    private func adoptStoredState() {
+        settings = store.loadSettings()
+        cycle = store.loadDailyCycle()
+        status = cycle.lastRecord?.status ?? .idle
+        statusMessage = cycle.lastRecord?.displayMessage ?? "대기 중"
+        operationBlockReason = nil
+        if refreshExecutionPermission() { reconcileSchedule(reason: "storage_recovered") }
+    }
+
     private func applyLaunchAtLogin(_ enabled: Bool) {
+        guard InstallationPolicy.isCanonicalApp(Bundle.main.bundleURL) else { return }
         do {
             let currentStatus = SMAppService.mainApp.status
             if enabled, currentStatus == .notRegistered {
@@ -144,54 +202,56 @@ final class AppState: ObservableObject {
             }
             let serviceStatus = SMAppService.mainApp.status
             settings.launchAtLogin = serviceStatus == .enabled
-            store.saveSettings(settings)
+            if !store.saveSettings(settings) { _ = refreshExecutionPermission(); return }
             if enabled, serviceStatus == .requiresApproval {
                 record(.failed, message: "시스템 설정의 로그인 항목에서 앱을 허용해 주세요.")
-                store.saveDailyCycle(cycle)
+                persistCycle()
             } else if enabled, serviceStatus != .enabled {
                 record(.failed, message: "로그인 실행을 활성화하지 못했습니다.")
-                store.saveDailyCycle(cycle)
+                persistCycle()
             }
         } catch {
             record(.failed, message: "로그인 실행 설정 실패: \(error.localizedDescription)")
-            store.saveDailyCycle(cycle)
+            persistCycle()
             notifyFailure(statusMessage)
         }
     }
 
     func connectClaude() {
-        guard !isWorking, !isSilentRefreshRunning else { return }
+        guard refreshExecutionPermission(), !isWorking, !isSilentRefreshRunning else { return }
         isWorking = true
         connectionState = .checking
 
         Task {
             defer { finishWorking() }
             do {
-                let inspection = try await Self.loginManagedClaude()
+                let inspection = try await loginClaude()
+                guard refreshExecutionPermission() else { return }
                 cacheQuota(inspection.quota)
                 connectionState = .connected
                 status = inspection.quota.active ? .satisfied : .idle
                 statusMessage = "Claude에 연결했습니다."
                 reconcileSchedule(reason: "login_completed")
             } catch {
+                guard operationBlockReason == nil else { return }
                 currentQuota = nil
                 updateConnectionFailure(error)
                 record(.failed, message: error.localizedDescription)
-                store.saveDailyCycle(cycle)
+                persistCycle()
             }
         }
     }
 
-    func refreshSilently() {
-        guard !isWorking, !isSilentRefreshRunning else { return }
+    func refreshSilently(force: Bool = false) {
+        guard refreshExecutionPermission(), !isWorking, !isSilentRefreshRunning else { return }
         let now = clock()
-        if let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: now) {
+        if !force, let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: now) {
             currentQuota = cache.quota
             connectionState = .connected
             lastSilentRefreshAt = cache.fetchedAt
             return
         }
-        if let lastSilentRefreshAt,
+        if !force, let lastSilentRefreshAt,
            now.timeIntervalSince(lastSilentRefreshAt) < Self.quotaCacheLifetime {
             return
         }
@@ -204,13 +264,18 @@ final class AppState: ObservableObject {
         Task {
             defer { isSilentRefreshRunning = false }
             do {
-                let inspection = try await Self.inspectManagedClaude()
+                let inspection = try await inspectClaude(UUID().uuidString)
+                guard refreshExecutionPermission() else { return }
                 cacheQuota(inspection.quota)
                 connectionState = .connected
+                diagnosticLog("connection.checked", ["reason": force ? "startup" : "menu", "outcome": "success"])
                 if cycle.firstFailure?.keychainAccessFailure == true {
                     reconcileSchedule(reason: "credential_available")
                 }
             } catch {
+                guard operationBlockReason == nil else { return }
+                diagnosticLog("connection.checked", ["reason": force ? "startup" : "menu",
+                                                      "outcome": "failed", "error_code": diagnosticErrorCode(error)])
                 if let serviceError = error as? ClaudeServiceError,
                    serviceError != .quotaRateLimited,
                    serviceError != .quotaUnavailable {
@@ -228,11 +293,11 @@ final class AppState: ObservableObject {
     var hasUnconfirmedWarmup: Bool { cycle.lastWarmupTargetAt != nil }
 
     func manualWarmup(allowResend: Bool = false) {
-        guard !isWorking else { return }
+        guard refreshExecutionPermission(), !hasActiveOperation else { return }
         if allowResend {
             cycle.lastWarmupTargetAt = nil
             cycle.lastWarmupAttemptAt = nil
-            store.saveDailyCycle(cycle)
+            guard persistCycle() else { return }
         }
         let now = clock()
         var candidateCycle = cycle
@@ -241,7 +306,7 @@ final class AppState: ObservableObject {
         let event = candidate.flatMap { $0.date <= now ? $0 : nil }
         if let event {
             cycle.firstFailure = nil
-            markScheduledWindowStarted(event)
+            guard markScheduledWindowStarted(event) else { return }
         }
         isWorking = true
         isManualWarmupRunning = true
@@ -262,9 +327,10 @@ final class AppState: ObservableObject {
                     complete(event, quota: result.inspection.quota, status: result.status, message: result.message)
                 } else {
                     record(result.status, message: result.message)
-                    store.saveDailyCycle(cycle)
+                    persistCycle()
                 }
             } catch {
+                guard operationBlockReason == nil else { return }
                 if error as? AppStateError == .scheduleChanged {
                     scheduleNext(reason: "operation_invalidated")
                 } else if let event {
@@ -273,21 +339,33 @@ final class AppState: ObservableObject {
                 } else {
                     updateConnectionFailure(error)
                     record(.failed, message: "수동 워밍 실패: \(error.localizedDescription)")
-                    store.saveDailyCycle(cycle)
+                    persistCycle()
                 }
             }
         }
     }
 
+    @discardableResult
+    private func persistCycle() -> Bool {
+        guard operationBlockReason == nil else { return false }
+        guard store.saveDailyCycle(cycle) else {
+            _ = refreshExecutionPermission()
+            return false
+        }
+        return true
+    }
+
     private func syncLaunchAtLoginStatus() {
+        guard InstallationPolicy.isCanonicalApp(Bundle.main.bundleURL) else { return }
         let enabled = SMAppService.mainApp.status == .enabled
         if settings.launchAtLogin != enabled {
             settings.launchAtLogin = enabled
-            store.saveSettings(settings)
+            if !store.saveSettings(settings) { _ = refreshExecutionPermission(); return }
         }
     }
 
     private func scheduleNext(after date: Date? = nil, reason: String = "next_window") {
+        guard operationBlockReason == nil else { return }
         guard !isWorking else {
             needsFreshSchedule = true
             pendingScheduleReasons.insert(reason)
@@ -317,15 +395,16 @@ final class AppState: ObservableObject {
 
     /// 복귀 시 남은 시간을 다시 계산하되, 유효한 재시도 시각은 앞당기지 않는다.
     func reconcileSchedule(reason: String) {
+        guard refreshExecutionPermission() else { return }
         scheduleRevision += 1
         if ["screen_unlocked", "credential_available"].contains(reason),
            cycle.firstFailure?.keychainAccessFailure == true {
-            cycle.firstFailure?.retryAt = clock()
-            store.saveDailyCycle(cycle)
+            cycle.firstFailure?.retryAt = max(clock(), cycle.firstFailure!.targetAt)
+            persistCycle()
         } else if ["system_wake", "startup", "login_completed", "screen_unlocked"].contains(reason),
            cycle.firstFailure != nil, cycle.firstFailure?.retryAt == nil {
-            cycle.firstFailure?.retryAt = clock()
-            store.saveDailyCycle(cycle)
+            cycle.firstFailure?.retryAt = max(clock(), cycle.firstFailure!.targetAt)
+            persistCycle()
         }
         pendingScheduleReasons.insert(reason)
         cancelScheduledTimer()
@@ -358,6 +437,7 @@ final class AppState: ObservableObject {
     }
 
     func arm(_ event: ScheduledEvent, at date: Date, reason: String = "scheduled") {
+        guard operationBlockReason == nil else { return }
         cancelScheduledTimer()
         let id = UUID()
         scheduledTimerID = id
@@ -413,6 +493,7 @@ final class AppState: ObservableObject {
     }
 
     func handle(_ event: ScheduledEvent, timerID: UUID? = nil) {
+        guard refreshExecutionPermission() else { return }
         guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
         let now = clock()
         guard now >= event.date else {
@@ -437,7 +518,7 @@ final class AppState: ObservableObject {
     }
 
     private func performScheduledWarmup(for event: ScheduledEvent, timerID: UUID?) {
-        markScheduledWindowStarted(event)
+        guard markScheduledWindowStarted(event) else { return }
 
         isWorking = true
         status = .checking
@@ -475,6 +556,7 @@ final class AppState: ObservableObject {
     private func checkSession(
         targetAt: Date, event: ScheduledEvent?, context: String, operationID: String
     ) async throws -> SessionCheckResult {
+        guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
         var initial: Inspection
         var inspectedRevision: Int
         var inspectedAt: Date
@@ -483,6 +565,7 @@ final class AppState: ObservableObject {
             inspectedRevision = scheduleRevision
             inspectedAt = clock()
             initial = try await inspectClaude(operationID)
+            guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
             refreshes += 1
         } while (inspectedRevision != scheduleRevision || clock().timeIntervalSince(inspectedAt) > 30) && refreshes < 2
         guard inspectedRevision == scheduleRevision, clock().timeIntervalSince(inspectedAt) <= 30 else {
@@ -503,19 +586,23 @@ final class AppState: ObservableObject {
             cycle.lastWarmupTargetAt = targetAt
             cycle.lastWarmupAttemptAt = clock()
             record(.warming, message: "세션을 활성화하고 있습니다.")
-            store.saveDailyCycle(cycle)
+            guard persistCycle() else { throw AppStateError.scheduleChanged }
             let warmupOperationID = UUID().uuidString
             var metadata = event.map(scheduledMetadata) ?? [:]
             metadata["context"] = context
             metadata["operation_id"] = warmupOperationID
             diagnosticLog("warmup.requested", metadata)
             do {
+                guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
                 try await warmClaude(initial.cliURL, warmupOperationID)
+                guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
             } catch {
-                if error as? ClaudeServiceError == .warmupNotStarted {
+                // runManagedWarmup은 인증 정보를 읽은 뒤에만 CLI를 시작한다.
+                // 이 단계의 실패를 미확인 전송으로 남기면 인증 복구 후에도 영구 차단된다.
+                if let serviceError = error as? ClaudeServiceError, serviceError.preventsWarmupStart {
                     cycle.lastWarmupTargetAt = nil
                     cycle.lastWarmupAttemptAt = nil
-                    store.saveDailyCycle(cycle)
+                    persistCycle()
                     throw error
                 }
                 guard error as? ClaudeServiceError == .warmupTimedOut
@@ -526,7 +613,7 @@ final class AppState: ObservableObject {
         }
 
         record(.checking, message: "세션 활성화를 확인하고 있습니다.")
-        store.saveDailyCycle(cycle)
+        guard persistCycle() else { throw AppStateError.scheduleChanged }
         var lastError = warmupError
         let confirmationDeadline = clock().addingTimeInterval(60)
         for seconds in [5, 10, 15, 15, 15] {
@@ -535,9 +622,11 @@ final class AppState: ObservableObject {
             if clock() > confirmationDeadline { break }
             let inspection: Inspection
             do {
+                guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
                 inspection = try await inspectClaude(operationID)
+                guard refreshExecutionPermission() else { throw AppStateError.scheduleChanged }
             } catch {
-                guard Self.shouldRetryScheduledFailure(error) else { throw error }
+                guard operationBlockReason == nil, Self.shouldRetryScheduledFailure(error) else { throw error }
                 lastError = error
                 continue
             }
@@ -554,8 +643,7 @@ final class AppState: ObservableObject {
         guard quota.active, let resetsAt = quota.resetsAt, resetsAt > clock() else { return false }
         cycle.lastWarmupTargetAt = nil
         cycle.lastWarmupAttemptAt = nil
-        store.saveDailyCycle(cycle)
-        return true
+        return persistCycle()
     }
 
     private func eventIsCurrent(_ event: ScheduledEvent, at now: Date) -> Bool {
@@ -565,7 +653,9 @@ final class AppState: ObservableObject {
         return candidate?.targetAt == event.targetAt && candidate?.windowNumber == event.windowNumber
     }
 
-    func markScheduledWindowStarted(_ event: ScheduledEvent) {
+    @discardableResult
+    func markScheduledWindowStarted(_ event: ScheduledEvent) -> Bool {
+        guard operationBlockReason == nil else { return false }
         if cycle.dayKey != event.dayKey {
             let pendingTarget = cycle.lastWarmupTargetAt
             let pendingAttempt = cycle.lastWarmupAttemptAt
@@ -576,7 +666,7 @@ final class AppState: ObservableObject {
         if cycle.firstFailure?.targetAt != event.targetAt { cycle.firstFailure = nil }
         cycle.nextResetAt = event.targetAt
         record(.checking, message: "\(event.windowNumber)번째 창 확인 시작")
-        store.saveDailyCycle(cycle)
+        return persistCycle()
     }
 
     private func complete(
@@ -585,6 +675,7 @@ final class AppState: ObservableObject {
         status completedStatus: WarmupStatus,
         message: String
     ) {
+        guard operationBlockReason == nil else { return }
         cacheQuota(quota)
         cycle.firstFailure = nil
         // 서버 시각의 1분 이내 보정은 같은 창으로 취급한다.
@@ -599,7 +690,7 @@ final class AppState: ObservableObject {
             ? quota.resetsAt
             : nil
         record(completedStatus, message: message)
-        store.saveDailyCycle(cycle)
+        guard persistCycle() else { return }
         var metadata = scheduledMetadata(event)
         metadata["outcome"] = completedStatus == .succeeded ? "warmed" : "already_active"
         metadata["actual_reset_at"] = diagnosticDate(quota.resetsAt)
@@ -612,7 +703,7 @@ final class AppState: ObservableObject {
     static func shouldRetryScheduledFailure(_ error: Error) -> Bool {
         if let serviceError = error as? ClaudeServiceError {
             switch serviceError {
-            case .oauthRefreshUnavailable, .quotaRateLimited, .quotaUnavailable:
+            case .oauthRefreshUnavailable, .quotaRateLimited, .quotaUnavailable, .cliLookupTimedOut:
                 return true
             case .warmupNotStarted, .warmupTimedOut, .warmupFailed:
                 // 이미 전송됐을 수 있다. 기존 중복 방지에 따라 후속 시도는 사용량만 확인한다.
@@ -635,6 +726,7 @@ final class AppState: ObservableObject {
     }
 
     func handleTargetFailure(_ error: Error, event: ScheduledEvent, at date: Date? = nil) {
+        guard operationBlockReason == nil else { return }
         let now = date ?? clock()
         guard !(cycle.dayKey == event.dayKey && cycle.handledWindows >= event.windowNumber) else { return }
         if cycle.firstFailure?.targetAt != event.targetAt {
@@ -642,21 +734,22 @@ final class AppState: ObservableObject {
                 targetAt: event.targetAt, message: "워밍 확인 실패: \(error.localizedDescription)"
             )
         }
-        let attempts = (cycle.firstFailure?.attempts ?? 0) + 1
+        let attempts = min(cycle.firstFailure?.attempts ?? 0, Int.max - 1) + 1
         cycle.firstFailure?.attempts = attempts
         let keychainAccessFailure = Self.isRecoverableKeychainFailure(error)
         cycle.firstFailure?.keychainAccessFailure = keychainAccessFailure
-        // 인증 접근이 일시 거부되면 당일 작업을 버리지 않고 느린 재확인을 유지한다.
-        let slowRecovery = keychainAccessFailure && attempts > 3
+        // 서버·네트워크·인증 접근의 일시 장애는 같은 당일 작업을 느리게 재확인한다.
+        // 이미 전송됐을 가능성이 있으면 checkSession의 중복 방지가 조회만 허용한다.
+        let slowRecovery = attempts > 3
         let retryAt = now.addingTimeInterval(slowRecovery ? 300 : 30)
-        let canRetry = Self.shouldRetryScheduledFailure(error) && (attempts <= 3 || keychainAccessFailure)
+        let canRetry = Self.shouldRetryScheduledFailure(error)
         cycle.firstFailure?.retryAt = canRetry ? retryAt : nil
         record(canRetry ? .checking : .failed, message: canRetry
-            ? (slowRecovery ? "인증 정보 접근 대기 중 · 5분 후 또는 잠금 해제 시 자동 재시도합니다." : "30초 후 세션 상태를 다시 확인합니다.")
+            ? (slowRecovery ? "복구 대기 중 · 5분 후 세션 상태를 다시 확인합니다." : "30초 후 세션 상태를 다시 확인합니다.")
             : hasUnconfirmedWarmup
                 ? "전송 결과 미확인: 다시 전송하지 않습니다. 상태 확인 또는 재전송을 선택해 주세요."
                 : "\(cycle.firstFailure!.message) · 복귀 또는 지금 워밍으로 재시도할 수 있습니다.")
-        store.saveDailyCycle(cycle)
+        guard persistCycle() else { return }
         var metadata = scheduledMetadata(event)
         metadata["attempts"] = "\(attempts)"
         metadata["retry_at"] = diagnosticDate(cycle.firstFailure?.retryAt)
@@ -696,6 +789,7 @@ final class AppState: ObservableObject {
     }
 
     private func cacheQuota(_ quota: QuotaWindow) {
+        guard operationBlockReason == nil else { return }
         currentQuota = quota
         store.saveQuotaCache(QuotaCache(quota: quota, fetchedAt: Date()))
     }
@@ -716,6 +810,7 @@ final class AppState: ObservableObject {
     }
 
     private func diagnosticErrorCode(_ error: Error) -> String {
+        if let error = error as? URLError { return "network_\(error.code.rawValue)" }
         if error is ClaudeServiceError {
             return ClaudeService.diagnosticErrorCode(error)
         }

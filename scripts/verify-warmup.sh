@@ -1,18 +1,28 @@
 #!/bin/bash
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-VERIFY_DIR="$ROOT_DIR/.build/warmup-verification"
+VERIFY_TEMP_ROOT="${TMPDIR:-/tmp}"
+VERIFY_DIR="$(mktemp -d "${VERIFY_TEMP_ROOT%/}/ClaudeSessionWarmerTests-Warmup.XXXXXX")"
+VERIFY_DIR="$(cd -- "$VERIFY_DIR" && pwd -P)"
 VERIFY_APP="$VERIFY_DIR/VerifyWarmup.app"
-VERIFY_EXECUTABLE="$VERIFY_APP/Contents/MacOS/VerifyWarmup"
+VERIFY_EXECUTABLE="$VERIFY_APP/Contents/MacOS/ClaudeSessionWarmerTests-VerifyWarmup"
 KEYCHAIN_PROFILE="$ROOT_DIR/.build/signing/embedded.provisionprofile"
 KEYCHAIN_ENTITLEMENTS="$ROOT_DIR/.build/signing/keychain.entitlements"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: HakKyeol Lee (V9SQZ6B7RP)}"
+cleanup() {
+  # 실제 제품 ID로 검증하므로 생성한 경로의 앱 등록만 해제한다.
+  rm -rf -- "$VERIFY_DIR"
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -u "$VERIFY_APP"
+}
+trap cleanup EXIT
 python3 "$ROOT_DIR/scripts/prepare-keychain-signing.py" "${PROVISIONING_PROFILE:-auto}" "$KEYCHAIN_ENTITLEMENTS" --identity "$CODESIGN_IDENTITY" --embed "$KEYCHAIN_PROFILE"
 mkdir -p "$VERIFY_APP/Contents/MacOS"
 cp "$ROOT_DIR/packaging/Info.plist" "$VERIFY_APP/Contents/Info.plist"
-/usr/libexec/PlistBuddy -c 'Set CFBundleExecutable VerifyWarmup' "$VERIFY_APP/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c 'Set CFBundleExecutable ClaudeSessionWarmerTests-VerifyWarmup' "$VERIFY_APP/Contents/Info.plist"
 cp "$KEYCHAIN_PROFILE" "$VERIFY_APP/Contents/embedded.provisionprofile"
-swiftc -parse-as-library -swift-version 6 \
+swiftc -parse-as-library -swift-version 6 -target arm64-apple-macos14.0 \
+  "$ROOT_DIR/Sources/ClaudeSessionWarmer/ExecutionOwnership.swift" \
   "$ROOT_DIR/Sources/ClaudeSessionWarmer/Models.swift" \
   "$ROOT_DIR/Sources/ClaudeSessionWarmer/DiagnosticLogger.swift" \
   "$ROOT_DIR/Sources/ClaudeSessionWarmer/ClaudeOAuthLoopback.swift" \
