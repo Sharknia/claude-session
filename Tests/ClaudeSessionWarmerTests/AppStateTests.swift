@@ -1,5 +1,6 @@
 import Foundation
 import XCTest
+import Security
 @testable import ClaudeSessionWarmer
 
 final class AppStateTests: XCTestCase {
@@ -181,13 +182,17 @@ final class AppStateTests: XCTestCase {
 
     @MainActor
     func testRetryPolicySeparatesAuthenticationFromTransientFailures() {
-        for error in [ClaudeServiceError.oauthRefreshFailed, .quotaUnauthorized, .managedCredentialsUnavailable, .credentialsUnavailable, .cliNotFound] {
+        for error in [ClaudeServiceError.oauthRefreshFailed, .quotaUnauthorized, .managedCredentialsUnavailable,
+                      .credentialsUnavailable(errSecMissingEntitlement), .credentialsUnavailable(errSecDecode), .cliNotFound] {
             XCTAssertFalse(AppState.shouldRetryScheduledFailure(error))
         }
         for error in [ClaudeServiceError.oauthRefreshUnavailable, .quotaUnavailable, .quotaRateLimited] {
             XCTAssertTrue(AppState.shouldRetryScheduledFailure(error))
         }
         XCTAssertTrue(AppState.shouldRetryScheduledFailure(URLError(.timedOut)))
+        for status in [errSecAuthFailed, errSecNotAvailable, errSecInteractionNotAllowed, errSecInDarkWake] {
+            XCTAssertTrue(AppState.shouldRetryScheduledFailure(ClaudeServiceError.credentialsUnavailable(status)))
+        }
     }
 
     private func withStore(_ body: (SettingsStore) -> Void) {

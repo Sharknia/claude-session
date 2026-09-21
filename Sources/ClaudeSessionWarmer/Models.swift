@@ -61,6 +61,7 @@ struct ScheduledWindowFailure: Codable, Equatable, Sendable {
     var message: String
     var attempts: Int?
     var retryAt: Date?
+    var keychainAccessFailure: Bool?
 }
 
 struct DailyCycle: Codable, Equatable, Sendable {

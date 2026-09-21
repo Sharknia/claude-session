@@ -1,6 +1,6 @@
 # 업데이트 확인과 원클릭 설치
 
-상태: 업데이트 기능 구현·자동 테스트·SDK 설치 경로 검증 완료. 2026-09-17 사용자 요청에 따른 릴리스 버전은 0.1.5, 내부 빌드는 11이다. 아래 2026-09-14 결과는 0.1.4 개발 당시 기록이다.
+상태: 업데이트 기능 구현·자동 테스트·SDK 설치 경로 검증 완료. 2026-09-21 사용자 요청에 따른 릴리스 버전은 0.1.6, 내부 빌드는 12다. 이번 Keychain 변경의 배포 검증 상태는 [11 검증 기록](11_UNATTENDED_KEYCHAIN_FIX.md)에 구분한다. 아래 2026-09-14 결과는 0.1.4 개발 당시 기록이다.
 
 ## 사용자 동작
 
@@ -28,10 +28,10 @@
 업데이트 목록 주소는 `https://github.com/Sharknia/claude-session/releases/latest/download/appcast.xml`이다. 이후 각 GitHub 릴리스에는 DMG와 서명된 `appcast.xml`을 함께 올려야 한다. 자동 생성 이후 XML을 편집하면 서명이 무효화되므로 재서명해야 한다.
 
 ```bash
-bash scripts/build-dmg.sh
+PROVISIONING_PROFILE=/path/to/ClaudeSessionWarmer.provisionprofile bash scripts/build-dmg.sh
 ```
 
-배포용 빌드는 앱·DMG 서명, 공증, stapling 후 `generate-appcast.sh`를 실행해 서명된 목록을 생성한다. 현재 브랜치의 출력은 `dist/ClaudeSessionWarmer-0.1.5.dmg`와 `dist/appcast.xml`이다. 서명 키나 공증 프로필에 접근하지 못하면 배포용 결과를 성공 처리하지 않는다.
+배포용 빌드는 앱·DMG 서명, 공증, stapling 후 `generate-appcast.sh`를 실행해 서명된 목록을 생성한다. 현재 브랜치의 출력은 `dist/ClaudeSessionWarmer-0.1.6.dmg`와 `dist/appcast.xml`이다. 0.1.6부터 앱의 Data Protection Keychain 권한을 허용하는 Developer ID 프로비저닝 프로필도 필요하다. 서명 키·공증 프로필·앱 프로비저닝 프로필에 접근하지 못하면 배포용 결과를 성공 처리하지 않는다.
 
 별도 테스트 아카이브나 다른 다운로드 주소를 검증할 때는 다음 형식을 사용한다.
 
@@ -39,7 +39,7 @@ bash scripts/build-dmg.sh
 bash scripts/generate-appcast.sh <아카이브 경로> <다운로드 URL 접두사> <출력 XML 경로>
 ```
 
-실제 업데이트 목록의 공개 게시와 제품 릴리스 게시는 구현·로컬 검증과 구분해 확인한다. v0.1.5 릴리스에는 공증된 DMG, 서명된 appcast.xml, SHA256SUMS.txt를 함께 게시한다. 기존 로컬 검증 빌드 10에서도 업데이트를 인식하도록 내부 빌드를 11로 증가시킨다.
+실제 업데이트 목록의 공개 게시와 제품 릴리스 게시는 구현·로컬 검증과 구분해 확인한다. v0.1.6 릴리스에는 공증된 DMG, 서명된 appcast.xml, SHA256SUMS.txt를 함께 게시한다. 기존 빌드 11에서 업데이트를 인식하도록 내부 빌드를 12로 증가시킨다.
 
 ## 검증 기준
 

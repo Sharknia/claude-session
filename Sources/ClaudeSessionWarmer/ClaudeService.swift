@@ -18,7 +18,7 @@ private let claudeAuthEnvironmentKeys = [
 
 enum ClaudeServiceError: LocalizedError, Equatable {
     case cliNotFound
-    case credentialsUnavailable
+    case credentialsUnavailable(OSStatus)
     case managedCredentialsUnavailable
     case loginCaptureFailed
     case oauthLoginTimedOut
@@ -35,7 +35,7 @@ enum ClaudeServiceError: LocalizedError, Equatable {
     var errorDescription: String? {
         switch self {
         case .cliNotFound: return "Claude CLI를 찾을 수 없습니다."
-        case .credentialsUnavailable: return "앱 전용 Claude 인증 정보를 Keychain에서 읽거나 저장하지 못했습니다."
+        case .credentialsUnavailable: return "앱 전용 Claude 인증 정보에 접근하지 못했습니다."
         case .managedCredentialsUnavailable: return "Claude 연결이 필요합니다. Claude 로그인을 눌러 주세요."
         case .loginCaptureFailed: return "Claude 로그인 뒤 OAuth 인증 정보를 가져오지 못했습니다."
         case .oauthLoginTimedOut: return "Claude 로그인이 시간 안에 완료되지 않았습니다. 다시 시도해 주세요."
@@ -203,37 +203,34 @@ enum ClaudeWarmupOutput {
     }
 }
 
-enum ClaudeCredentialQueries {
+struct ClaudeCredentialQueries {
     static let cacheService = "com.sharknia.ClaudeSessionWarmer.oauth"
     static let cacheAccount = "claude-managed-credential"
+    var service = cacheService
+    var account = cacheAccount
 
-    static func cacheRead() -> [CFString: Any] {
+    func cacheRead(legacy: Bool = false) -> [CFString: Any] {
+        var query = cacheUpdateQuery(legacy: legacy)
+        query[kSecReturnData] = true
+        query[kSecMatchLimit] = kSecMatchLimitOne
+        return query
+    }
+
+    func cacheUpdateQuery(legacy: Bool = false) -> [CFString: Any] {
         [
             kSecClass: kSecClassGenericPassword,
-            kSecAttrService: cacheService,
-            kSecAttrAccount: cacheAccount,
-            kSecReturnData: true,
-            kSecMatchLimit: kSecMatchLimitOne,
-            kSecUseAuthenticationContext: nonInteractiveContext()
+            kSecAttrService: service,
+            kSecAttrAccount: account,
+            kSecUseDataProtectionKeychain: !legacy,
+            kSecUseAuthenticationContext: Self.nonInteractiveContext()
         ]
     }
 
-    static func cacheUpdateQuery() -> [CFString: Any] {
-        [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: cacheService,
-            kSecAttrAccount: cacheAccount
-        ]
-    }
-
-    static func cacheAddPayload(data: Data) -> [CFString: Any] {
-        [
-            kSecClass: kSecClassGenericPassword,
-            kSecAttrService: cacheService,
-            kSecAttrAccount: cacheAccount,
-            kSecAttrAccessible: kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly,
-            kSecValueData: data
-        ]
+    func cacheAddPayload(data: Data) -> [CFString: Any] {
+        var query = cacheUpdateQuery()
+        query[kSecAttrAccessible] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
+        query[kSecValueData] = data
+        return query
     }
 
     private static func nonInteractiveContext() -> LAContext {
@@ -264,6 +261,23 @@ struct ManagedClaudeCredential: Codable, Equatable, Sendable {
 actor ManagedCredentialRefreshCoordinator {
     private var busy = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var pendingSave: ManagedClaudeCredential?
+
+    // run의 직렬 구간에서만 호출한다. 저장 실패 뒤 회전 전 토큰으로 다시 갱신하지 않는다.
+    func persist(
+        _ credential: ManagedClaudeCredential,
+        using save: @Sendable (ManagedClaudeCredential) async throws -> Void
+    ) async throws {
+        pendingSave = credential
+        try await save(credential)
+        pendingSave = nil
+    }
+
+    func retryPendingSave(using save: @Sendable (ManagedClaudeCredential) async throws -> Void) async throws {
+        guard let credential = pendingSave else { return }
+        try await save(credential)
+        pendingSave = nil
+    }
 
     func run(_ operation: @escaping @Sendable () async throws -> ManagedClaudeCredential) async throws -> ManagedClaudeCredential {
         if busy {
@@ -278,10 +292,6 @@ actor ManagedCredentialRefreshCoordinator {
         try Task.checkCancellation()
         return try await operation()
     }
-}
-
-private struct KeychainStatusError: Error {
-    let status: OSStatus
 }
 
 final class ClaudeService {
@@ -315,15 +325,8 @@ final class ClaudeService {
         return URL(fileURLWithPath: path)
     }
 
-    private func copyData(for query: [CFString: Any]) throws -> Data {
-        var item: CFTypeRef?
-        let status = SecItemCopyMatching(query as CFDictionary, &item)
-        guard status == errSecSuccess, let data = item as? Data else { throw KeychainStatusError(status: status) }
-        return data
-    }
-
     func managedAccessToken() throws -> String {
-        try readManagedCredential().accessToken
+        try ManagedCredentialStore().read().accessToken
     }
 
     func loginAndCapture(cliURL: URL, session: URLSession = .shared) async throws -> ManagedClaudeCredential {
@@ -369,7 +372,7 @@ final class ClaudeService {
             }
             let credential = try ClaudeOAuthFlow.parseTokenResponse(data)
             return try await Self.refreshCoordinator.run {
-                try ClaudeService().storeManagedCredential(credential)
+                try await Self.refreshCoordinator.persist(credential) { try ManagedCredentialStore().save($0) }
                 return credential
             }
         } catch let error as ClaudeServiceError {
@@ -389,40 +392,11 @@ final class ClaudeService {
         }
     }
 
-    private func readManagedCredential() throws -> ManagedClaudeCredential {
-        do {
-            let data = try copyData(for: ClaudeCredentialQueries.cacheRead())
-            return try Self.parseManagedCredential(from: data)
-        } catch let error as KeychainStatusError where error.status == errSecItemNotFound {
-            throw ClaudeServiceError.managedCredentialsUnavailable
-        } catch is KeychainStatusError {
-            throw ClaudeServiceError.credentialsUnavailable
-        }
-    }
-
-    private func storeManagedCredential(_ credential: ManagedClaudeCredential) throws {
-        let data = try JSONEncoder().encode(credential)
-        try storeManagedCredentialData(data)
-    }
-
-    private func storeManagedCredentialData(_ data: Data) throws {
-        let status = SecItemUpdate(
-            ClaudeCredentialQueries.cacheUpdateQuery() as CFDictionary,
-            [kSecValueData: data] as CFDictionary
-        )
-        if status == errSecItemNotFound {
-            let payload = ClaudeCredentialQueries.cacheAddPayload(data: data)
-            let addStatus = SecItemAdd(payload as CFDictionary, nil)
-            guard addStatus == errSecSuccess else { throw ClaudeServiceError.credentialsUnavailable }
-        } else if status != errSecSuccess {
-            throw ClaudeServiceError.credentialsUnavailable
-        }
-    }
-
     private func refreshedManagedCredentialIfNeeded(session: URLSession, force: Bool) async throws -> ManagedClaudeCredential {
         try await Self.refreshCoordinator.run {
-            let service = ClaudeService()
-            let credential = try service.readManagedCredential()
+            try await Self.refreshCoordinator.retryPendingSave { try ManagedCredentialStore().save($0) }
+            let store = ManagedCredentialStore()
+            let credential = try store.read()
             guard force || credential.needsRefresh() else { return credential }
             diagnosticLog("oauth.refresh_requested", [
                 "operation_id": DiagnosticContext.operationID ?? "none",
@@ -432,7 +406,7 @@ final class ClaudeService {
             do {
                 let refreshed = try await Self.refreshManagedCredential(credential, session: session)
                 // 회전된 refresh token을 다음 호출에 넘기기 전에 즉시 저장한다.
-                try service.storeManagedCredential(refreshed)
+                try await Self.refreshCoordinator.persist(refreshed) { try ManagedCredentialStore().save($0) }
                 diagnosticLog("oauth.refresh_completed", [
                     "operation_id": DiagnosticContext.operationID ?? "none",
                     "outcome": "success",

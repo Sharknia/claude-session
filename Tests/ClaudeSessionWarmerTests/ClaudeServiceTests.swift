@@ -10,11 +10,12 @@ final class ClaudeServiceTests: XCTestCase {
     }
 
     func testCredentialQueriesUseOnlyAppKeychain() {
-        let cache = ClaudeCredentialQueries.cacheAddPayload(data: Data("managed".utf8))
+        let cache = ClaudeCredentialQueries().cacheAddPayload(data: Data("managed".utf8))
 
         XCTAssertEqual(cache[kSecAttrService] as? String, ClaudeCredentialQueries.cacheService)
         XCTAssertEqual(cache[kSecAttrAccount] as? String, ClaudeCredentialQueries.cacheAccount)
         XCTAssertEqual(cache[kSecAttrAccessible] as? String, kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String)
+        XCTAssertEqual(cache[kSecUseDataProtectionKeychain] as? Bool, true)
     }
 
     func testManagedCredentialParser() throws {

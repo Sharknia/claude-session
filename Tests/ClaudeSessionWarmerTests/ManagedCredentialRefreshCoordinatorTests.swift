@@ -1,8 +1,34 @@
 import XCTest
+import Security
 @testable import ClaudeSessionWarmer
 
 @MainActor
 final class ManagedCredentialRefreshCoordinatorTests: XCTestCase {
+    func testRotatedCredentialSurvivesSaveFailureWithoutAnotherRemoteRefresh() async throws {
+        let coordinator = ManagedCredentialRefreshCoordinator()
+        let store = PendingSaveFixture()
+        do {
+            _ = try await coordinator.run {
+                let rotated = await store.refresh()
+                try await coordinator.persist(rotated) { try await store.save($0) }
+                return rotated
+            }
+            XCTFail("첫 저장은 실패해야 한다")
+        } catch {
+            XCTAssertEqual(error as? ClaudeServiceError, .credentialsUnavailable(errSecNotAvailable))
+        }
+        _ = try await coordinator.run {
+            try await coordinator.retryPendingSave { try await store.save($0) }
+            let current = await store.read()
+            if current.needsRefresh() { return await store.refresh() }
+            return current
+        }
+        let saved = await store.read()
+        let refreshes = await store.refreshes
+        XCTAssertEqual(saved.refreshToken, "rotated-fixture")
+        XCTAssertEqual(refreshes, 1)
+    }
+
     func testConcurrentRotationsReadPreviouslySavedCredential() async throws {
         let coordinator = ManagedCredentialRefreshCoordinator()
         let store = RotationFixture()
@@ -53,6 +79,27 @@ final class ManagedCredentialRefreshCoordinatorTests: XCTestCase {
         }
         let store = RotationFixture()
         _ = try await coordinator.run { await store.read() }
+    }
+}
+
+private actor PendingSaveFixture {
+    private var credential = ManagedClaudeCredential(accessToken: "old", refreshToken: "old",
+                                                    expiresAtMilliseconds: 0, scopes: [])
+    private var failNextSave = true
+    private(set) var refreshes = 0
+    func read() -> ManagedClaudeCredential { credential }
+    func refresh() -> ManagedClaudeCredential {
+        refreshes += 1
+        return ManagedClaudeCredential(accessToken: "rotated-fixture", refreshToken: "rotated-fixture",
+                                       expiresAtMilliseconds: Int64(Date().addingTimeInterval(3600).timeIntervalSince1970 * 1000),
+                                       scopes: [])
+    }
+    func save(_ credential: ManagedClaudeCredential) throws {
+        if failNextSave {
+            failNextSave = false
+            throw ClaudeServiceError.credentialsUnavailable(errSecNotAvailable)
+        }
+        self.credential = credential
     }
 }
 

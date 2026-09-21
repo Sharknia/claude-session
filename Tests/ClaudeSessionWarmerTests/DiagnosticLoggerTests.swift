@@ -3,6 +3,19 @@ import XCTest
 @testable import ClaudeSessionWarmer
 
 final class DiagnosticLoggerTests: XCTestCase {
+    func testScreenUnlockReachesScheduleRecoveryWithoutSystemWake() async {
+        let screenCenter = NotificationCenter()
+        let recovered = expectation(description: "화면 잠금 해제가 복구를 요청한다")
+        let monitor = LifecycleMonitor(workspaceCenter: NotificationCenter(), distributedCenter: screenCenter) { reason in
+            XCTAssertEqual(reason, "screen_unlocked")
+            recovered.fulfill()
+        }
+        screenCenter.post(name: Notification.Name("com.apple.screenIsLocked"), object: nil)
+        screenCenter.post(name: Notification.Name("com.apple.screenIsUnlocked"), object: nil)
+        await fulfillment(of: [recovered], timeout: 1)
+        withExtendedLifetime(monitor) {}
+    }
+
     func testAppendWritesParseableRedactedJSONLWithPrivatePermissions() async throws {
         let directory = temporaryDirectory()
         defer { try? FileManager.default.removeItem(at: directory) }
