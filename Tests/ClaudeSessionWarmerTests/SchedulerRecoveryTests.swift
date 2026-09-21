@@ -5,6 +5,51 @@ import XCTest
 
 @MainActor
 final class SchedulerRecoveryTests: XCTestCase {
+    func testTransientServiceFailureKeepsTodayUntilNetworkRecovers() async throws {
+        for error in [ClaudeServiceError.quotaUnavailable, .oauthRefreshUnavailable, .quotaRateLimited] {
+            let f = Fixture(error: error, active: false)
+            defer { f.cleanup() }
+            var state = f.makeState()
+            state.handle(f.event)
+            try await finish(state)
+            for _ in 0..<3 {
+                f.clock.set(try XCTUnwrap(state.nextEvent?.date))
+                state.handle(try XCTUnwrap(state.nextEvent))
+                try await finish(state)
+            }
+            let retry = try XCTUnwrap(state.nextEvent)
+            XCTAssertEqual(retry.targetAt, f.target, "\(error)")
+            XCTAssertEqual(retry.date, f.clock.now().addingTimeInterval(300))
+            guard retry.targetAt == f.target else { continue }
+            state = f.makeState()
+            f.clock.set(retry.date)
+            await f.backend.clearError()
+            state.handle(retry) // 잠금 해제·수동 조작 없이 저장된 재시도로 복구한다.
+            try await finish(state)
+            XCTAssertEqual(state.status, .succeeded)
+            let warmups = await f.backend.warmups
+            XCTAssertEqual(warmups, 1)
+        }
+    }
+
+    func testCredentialFailureBeforeCLIStartDoesNotSuppressRecovery() async throws {
+        let f = Fixture(active: false, warmupError: .credentialsUnavailable(errSecAuthFailed))
+        defer { f.cleanup() }
+        let first = f.makeState()
+        first.handle(f.event)
+        try await finish(first)
+        XCTAssertFalse(first.hasUnconfirmedWarmup)
+        let retry = try XCTUnwrap(first.nextEvent)
+        f.clock.set(retry.date)
+        await f.backend.clearError()
+        let restarted = f.makeState()
+        restarted.handle(retry)
+        try await finish(restarted)
+        XCTAssertEqual(restarted.status, .succeeded)
+        let warmups = await f.backend.warmups
+        XCTAssertEqual(warmups, 1)
+    }
+
     func testKeychainFailureKeepsTodaysTargetAfterFastRetriesAndRecoversOnUnlock() async throws {
         let f = Fixture(error: .credentialsUnavailable(errSecAuthFailed), active: false)
         defer { f.cleanup() }
@@ -286,14 +331,16 @@ private struct Fixture {
         ScheduledEvent(date: target, targetAt: target, dayKey: "2026-09-14", windowNumber: 1)
     }
 
-    init(offset: TimeInterval = 0, hold: Bool = false, error: ClaudeServiceError? = nil, active: Bool = true) {
+    init(offset: TimeInterval = 0, hold: Bool = false, error: ClaudeServiceError? = nil,
+         active: Bool = true, warmupError: ClaudeServiceError? = nil) {
         defaults = UserDefaults(suiteName: suite)!
         store = SettingsStore(defaults: defaults)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Seoul")!
         engine = ScheduleEngine(calendar: calendar)
         clock = RecoveryClock(target.addingTimeInterval(offset))
-        backend = RecoveryBackend(reset: target.addingTimeInterval(18_000), hold: hold, error: error, active: active)
+        backend = RecoveryBackend(reset: target.addingTimeInterval(18_000), hold: hold,
+                                  error: error, active: active, warmupError: warmupError)
         store.saveSettings(ScheduleSettings(firstWarmupMinutes: 360, excludeKoreanHolidays: false))
         store.saveDailyCycle(DailyCycle(dayKey: "2026-09-14"))
     }
@@ -302,7 +349,7 @@ private struct Fixture {
         let clock = clock, backend = backend
         return AppState(store: store, engine: engine, startScheduler: false, clock: { clock.now() },
                         inspectClaude: { try await backend.inspect($0) },
-                        warmClaude: { _, _ in await backend.warm() },
+                        warmClaude: { _, _ in try await backend.warm() },
                         confirmationSleep: { _ in })
     }
 
@@ -321,17 +368,19 @@ private actor RecoveryBackend {
     private let reset: Date
     private let hold: Bool
     private var error: ClaudeServiceError?
+    private var warmupError: ClaudeServiceError?
     private var active: Bool
     private(set) var warmups = 0
     private var continuation: CheckedContinuation<Void, Never>?
     private(set) var inspections = 0
     var waiting: Bool { continuation != nil }
 
-    init(reset: Date, hold: Bool, error: ClaudeServiceError?, active: Bool) {
+    init(reset: Date, hold: Bool, error: ClaudeServiceError?, active: Bool, warmupError: ClaudeServiceError?) {
         self.reset = reset
         self.hold = hold
         self.error = error
         self.active = active
+        self.warmupError = warmupError
     }
 
     func inspect(_ id: String) async throws -> Inspection {
@@ -342,8 +391,12 @@ private actor RecoveryBackend {
                           quota: QuotaWindow(active: active, resetsAt: active ? reset : nil), operationID: id)
     }
 
-    func warm() { warmups += 1; active = true }
+    func warm() throws {
+        if let warmupError { throw warmupError }
+        warmups += 1
+        active = true
+    }
 
     func release() { continuation?.resume(); continuation = nil }
-    func clearError() { error = nil }
+    func clearError() { error = nil; warmupError = nil }
 }

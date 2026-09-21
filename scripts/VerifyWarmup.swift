@@ -6,6 +6,7 @@ import Security
 @main
 struct VerifyWarmup {
     static func main() async {
+        print("verification_pid=\(ProcessInfo.processInfo.processIdentifier)")
         let operationID = UUID().uuidString
         do {
             try await DiagnosticContext.$operationID.withValue(operationID) {

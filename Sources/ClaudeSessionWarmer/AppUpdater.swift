@@ -16,7 +16,10 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     init(state: AppState) {
         self.state = state
         super.init()
-        state.$isWorking.removeDuplicates().receive(on: DispatchQueue.main).sink { [weak self] _ in
+        let busy = state.$isWorking.combineLatest(state.$isSilentRefreshRunning)
+            .map { working, refreshing in working || refreshing }
+            .removeDuplicates()
+        busy.receive(on: DispatchQueue.main).sink { [weak self] _ in
             Task { @MainActor [weak self] in self?.resumePendingInstall() }
         }.store(in: &observations)
         // SwiftPM 테스트·CLI에는 배포용 Info.plist가 없으므로 업데이트 UI를 띄우지 않는다.
@@ -26,7 +29,7 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
         self.userDriver = userDriver
         self.updater = updater
         updater.publisher(for: \.canCheckForUpdates)
-            .combineLatest(state.$isWorking)
+            .combineLatest(busy)
             .map { canCheck, working in canCheck && !working }
             .receive(on: DispatchQueue.main)
             .removeDuplicates()
@@ -43,15 +46,15 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func checkForUpdates() {
-        guard canCheckForUpdates, !state.isWorking else { return }
+        guard canCheckForUpdates, !state.hasActiveOperation else { return }
         diagnosticLog("update.check_requested")
         updater?.checkForUpdates()
     }
 
     func updater(_ updater: SPUUpdater, mayPerform updateCheck: SPUUpdateCheck) throws {
-        guard !state.isWorking else {
+        guard !state.hasActiveOperation else {
             throw NSError(domain: "ClaudeSessionWarmer.Update", code: 1,
-                          userInfo: [NSLocalizedDescriptionKey: "워밍이 끝난 뒤 업데이트를 확인해 주세요."])
+                          userInfo: [NSLocalizedDescriptionKey: "진행 중인 세션 확인이 끝난 뒤 업데이트를 확인해 주세요."])
         }
     }
 
@@ -61,14 +64,14 @@ final class AppUpdater: NSObject, ObservableObject, SPUUpdaterDelegate {
     }
 
     func postponeInstallationIfWorking(_ installHandler: @escaping () -> Void) -> Bool {
-        guard state.isWorking else { return false }
+        guard state.hasActiveOperation else { return false }
         pendingInstall = installHandler
-        diagnosticLog("update.install_deferred", ["reason": "warmup_running"])
+        diagnosticLog("update.install_deferred", ["reason": state.isSilentRefreshRunning ? "credential_refresh_running" : "warmup_running"])
         return true
     }
 
     private func resumePendingInstall() {
-        guard !state.isWorking, let install = pendingInstall else { return }
+        guard !state.hasActiveOperation, let install = pendingInstall else { return }
         pendingInstall = nil
         install()
     }

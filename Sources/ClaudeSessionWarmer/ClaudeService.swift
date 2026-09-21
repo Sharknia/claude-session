@@ -18,6 +18,7 @@ private let claudeAuthEnvironmentKeys = [
 
 enum ClaudeServiceError: LocalizedError, Equatable {
     case cliNotFound
+    case cliLookupTimedOut
     case credentialsUnavailable(OSStatus)
     case managedCredentialsUnavailable
     case loginCaptureFailed
@@ -32,9 +33,20 @@ enum ClaudeServiceError: LocalizedError, Equatable {
     case warmupTimedOut
     case warmupFailed
 
+    /// 현재 워밍 경로에서 이 오류들은 인증 준비 또는 프로세스 생성 전에만 발생한다.
+    var preventsWarmupStart: Bool {
+        switch self {
+        case .credentialsUnavailable, .managedCredentialsUnavailable, .warmupNotStarted:
+            return true
+        default:
+            return false
+        }
+    }
+
     var errorDescription: String? {
         switch self {
         case .cliNotFound: return "Claude CLI를 찾을 수 없습니다."
+        case .cliLookupTimedOut: return "Claude CLI 설치 경로 확인 시간이 초과되었습니다."
         case .credentialsUnavailable: return "앱 전용 Claude 인증 정보에 접근하지 못했습니다."
         case .managedCredentialsUnavailable: return "Claude 연결이 필요합니다. Claude 로그인을 눌러 주세요."
         case .loginCaptureFailed: return "Claude 로그인 뒤 OAuth 인증 정보를 가져오지 못했습니다."
@@ -436,6 +448,8 @@ final class ClaudeService {
             diagnosticLog("oauth.refresh_http", [
                 "operation_id": DiagnosticContext.operationID ?? "none",
                 "outcome": "network_error",
+                "error_domain": (error as NSError).domain,
+                "error_code": "\((error as NSError).code)",
                 "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
             ])
             throw ClaudeServiceError.oauthRefreshUnavailable
@@ -532,6 +546,8 @@ final class ClaudeService {
                 "request_id": requestID,
                 "operation_id": operationID,
                 "outcome": "network_error",
+                "error_domain": (error as NSError).domain,
+                "error_code": "\((error as NSError).code)",
                 "elapsed_ms": "\(Int(Date().timeIntervalSince(startedAt) * 1_000))"
             ])
             throw ClaudeServiceError.quotaUnavailable
@@ -597,6 +613,7 @@ final class ClaudeService {
         guard let error = error as? ClaudeServiceError else { return "unexpected" }
         switch error {
         case .cliNotFound: return "cli_not_found"
+        case .cliLookupTimedOut: return "cli_lookup_timeout"
         case .credentialsUnavailable: return "keychain_unavailable"
         case .managedCredentialsUnavailable: return "managed_credentials_missing"
         case .loginCaptureFailed: return "oauth_login_failed"
@@ -691,10 +708,11 @@ final class ClaudeService {
         slaveFD = -1
 
         _ = fcntl(masterFD, F_SETFL, fcntl(masterFD, F_GETFL) | O_NONBLOCK)
-        let deadline = Date().addingTimeInterval(timeout)
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
         var output = Data()
         var receivedMarker = false
-        while Date() < deadline {
+        while clock.now < deadline {
             var buffer = [UInt8](repeating: 0, count: 4096)
             let count = read(masterFD, &buffer, buffer.count)
             if count > 0 {
@@ -712,12 +730,12 @@ final class ClaudeService {
             usleep(50_000)
         }
         if receivedMarker {
-            let exitDeadline = min(deadline, Date().addingTimeInterval(0.75))
-            while process.isRunning && Date() < exitDeadline { usleep(25_000) }
+            let exitDeadline = min(deadline, clock.now.advanced(by: .milliseconds(750)))
+            while process.isRunning && clock.now < exitDeadline { usleep(25_000) }
         }
         guard receivedMarker else {
             requiredForcedStop = process.isRunning
-            if Date() >= deadline {
+            if clock.now >= deadline {
                 diagnosticOutcome = "timeout"
                 throw ClaudeServiceError.warmupTimedOut
             }
@@ -728,16 +746,39 @@ final class ClaudeService {
         requiredForcedStop = process.isRunning
     }
 
-    private func run(executable: URL, arguments: [String]) throws -> (stdout: Data, status: Int32) {
+    func run(executable: URL, arguments: [String], timeout: TimeInterval = 5) throws -> (stdout: Data, status: Int32) {
         let process = Process()
         let output = Pipe()
         process.executableURL = executable
         process.arguments = arguments
         process.standardOutput = output
-        process.standardError = Pipe()
+        // 로그인 셸의 경고가 읽지 않는 stderr 파이프를 채워 프로세스를 멈추지 않게 한다.
+        process.standardError = FileHandle.nullDevice
         try process.run()
-        let data = output.fileHandleForReading.readDataToEndOfFile()
-        process.waitUntilExit()
+        defer { Self.stopProcess(process) }
+        try? output.fileHandleForWriting.close()
+        defer { try? output.fileHandleForReading.close() }
+        let fd = output.fileHandleForReading.fileDescriptor
+        guard fcntl(fd, F_SETFL, fcntl(fd, F_GETFL) | O_NONBLOCK) != -1 else {
+            throw ClaudeServiceError.cliNotFound
+        }
+        let clock = ContinuousClock()
+        let deadline = clock.now.advanced(by: .seconds(timeout))
+        var data = Data()
+        func readChunk() throws -> Bool {
+            var buffer = [UInt8](repeating: 0, count: 4096)
+            let count = read(fd, &buffer, buffer.count)
+            guard count > 0 else { return false }
+            data.append(contentsOf: buffer.prefix(count))
+            guard data.count <= 16_384 else { throw ClaudeServiceError.cliNotFound }
+            return true
+        }
+        while process.isRunning {
+            guard clock.now < deadline else { throw ClaudeServiceError.cliLookupTimedOut }
+            if try !readChunk() { usleep(25_000) }
+        }
+        // 프로세스 종료 후 남아 있는 짧은 경로 출력도 회수한다.
+        while try readChunk() {}
         return (data, process.terminationStatus)
     }
 
@@ -748,15 +789,16 @@ final class ClaudeService {
     }
 
     private static func stopProcess(_ process: Process) {
+        let clock = ContinuousClock()
         if process.isRunning {
             process.terminate()
-            let terminateDeadline = Date().addingTimeInterval(1)
-            while process.isRunning && Date() < terminateDeadline { usleep(25_000) }
+            let terminateDeadline = clock.now.advanced(by: .seconds(1))
+            while process.isRunning && clock.now < terminateDeadline { usleep(25_000) }
         }
         if process.isRunning {
             kill(process.processIdentifier, SIGKILL)
-            let killDeadline = Date().addingTimeInterval(1)
-            while process.isRunning && Date() < killDeadline { usleep(25_000) }
+            let killDeadline = clock.now.advanced(by: .seconds(1))
+            while process.isRunning && clock.now < killDeadline { usleep(25_000) }
         }
         if !process.isRunning {
             process.waitUntilExit()

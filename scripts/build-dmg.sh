@@ -35,6 +35,10 @@ if [[ ! -f "$PROJECT_DIR/Package.swift" || ! -f "$INFO_PLIST_SOURCE" || ! -f "$A
     exit 1
 fi
 
+# 실패 주입 회귀와 실제 격리 Keychain 검증을 통과한 코드만 패키징한다.
+swift test --package-path "$PROJECT_DIR"
+bash "$SCRIPT_DIR/verify-warmup.sh" --storage-probe
+
 mkdir -p "$DIST_DIR"
 
 # Only remove this script's exact, reproducible outputs.

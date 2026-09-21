@@ -23,6 +23,7 @@ final class AppState: ObservableObject {
     @Published private(set) var statusMessage: String
     @Published private(set) var isWorking = false
     @Published private(set) var isManualWarmupRunning = false
+    @Published private(set) var isSilentRefreshRunning = false
     @Published private(set) var connectionState: ClaudeConnectionState = .disconnected
 
     private let store: SettingsStore
@@ -38,8 +39,9 @@ final class AppState: ObservableObject {
     private var needsFreshSchedule = false
     private var pendingScheduleReasons: Set<String> = []
     private var scheduleRevision = 0
-    private var isSilentRefreshRunning = false
     private var lastSilentRefreshAt: Date?
+
+    var hasActiveOperation: Bool { isWorking || isSilentRefreshRunning }
 
     init(
         store: SettingsStore = SettingsStore(),
@@ -93,6 +95,10 @@ final class AppState: ObservableObject {
                 }
             }
             reconcileSchedule(reason: "startup")
+            // 예약 직전까지 잘못된 CLI·인증 상태를 숨기지 않는다. 워밍은 하지 않는다.
+            if let nextEvent, nextEvent.date > clock().addingTimeInterval(30) {
+                refreshSilently(force: true)
+            }
         }
     }
 
@@ -182,16 +188,16 @@ final class AppState: ObservableObject {
         }
     }
 
-    func refreshSilently() {
+    func refreshSilently(force: Bool = false) {
         guard !isWorking, !isSilentRefreshRunning else { return }
         let now = clock()
-        if let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: now) {
+        if !force, let cache = store.loadQuotaCache(), Self.isQuotaCacheFresh(cache, at: now) {
             currentQuota = cache.quota
             connectionState = .connected
             lastSilentRefreshAt = cache.fetchedAt
             return
         }
-        if let lastSilentRefreshAt,
+        if !force, let lastSilentRefreshAt,
            now.timeIntervalSince(lastSilentRefreshAt) < Self.quotaCacheLifetime {
             return
         }
@@ -204,13 +210,16 @@ final class AppState: ObservableObject {
         Task {
             defer { isSilentRefreshRunning = false }
             do {
-                let inspection = try await Self.inspectManagedClaude()
+                let inspection = try await inspectClaude(UUID().uuidString)
                 cacheQuota(inspection.quota)
                 connectionState = .connected
+                diagnosticLog("connection.checked", ["reason": force ? "startup" : "menu", "outcome": "success"])
                 if cycle.firstFailure?.keychainAccessFailure == true {
                     reconcileSchedule(reason: "credential_available")
                 }
             } catch {
+                diagnosticLog("connection.checked", ["reason": force ? "startup" : "menu",
+                                                      "outcome": "failed", "error_code": diagnosticErrorCode(error)])
                 if let serviceError = error as? ClaudeServiceError,
                    serviceError != .quotaRateLimited,
                    serviceError != .quotaUnavailable {
@@ -512,7 +521,9 @@ final class AppState: ObservableObject {
             do {
                 try await warmClaude(initial.cliURL, warmupOperationID)
             } catch {
-                if error as? ClaudeServiceError == .warmupNotStarted {
+                // runManagedWarmup은 인증 정보를 읽은 뒤에만 CLI를 시작한다.
+                // 이 단계의 실패를 미확인 전송으로 남기면 인증 복구 후에도 영구 차단된다.
+                if let serviceError = error as? ClaudeServiceError, serviceError.preventsWarmupStart {
                     cycle.lastWarmupTargetAt = nil
                     cycle.lastWarmupAttemptAt = nil
                     store.saveDailyCycle(cycle)
@@ -612,7 +623,7 @@ final class AppState: ObservableObject {
     static func shouldRetryScheduledFailure(_ error: Error) -> Bool {
         if let serviceError = error as? ClaudeServiceError {
             switch serviceError {
-            case .oauthRefreshUnavailable, .quotaRateLimited, .quotaUnavailable:
+            case .oauthRefreshUnavailable, .quotaRateLimited, .quotaUnavailable, .cliLookupTimedOut:
                 return true
             case .warmupNotStarted, .warmupTimedOut, .warmupFailed:
                 // 이미 전송됐을 수 있다. 기존 중복 방지에 따라 후속 시도는 사용량만 확인한다.
@@ -646,13 +657,14 @@ final class AppState: ObservableObject {
         cycle.firstFailure?.attempts = attempts
         let keychainAccessFailure = Self.isRecoverableKeychainFailure(error)
         cycle.firstFailure?.keychainAccessFailure = keychainAccessFailure
-        // 인증 접근이 일시 거부되면 당일 작업을 버리지 않고 느린 재확인을 유지한다.
-        let slowRecovery = keychainAccessFailure && attempts > 3
+        // 서버·네트워크·인증 접근의 일시 장애는 같은 당일 작업을 느리게 재확인한다.
+        // 이미 전송됐을 가능성이 있으면 checkSession의 중복 방지가 조회만 허용한다.
+        let slowRecovery = attempts > 3
         let retryAt = now.addingTimeInterval(slowRecovery ? 300 : 30)
-        let canRetry = Self.shouldRetryScheduledFailure(error) && (attempts <= 3 || keychainAccessFailure)
+        let canRetry = Self.shouldRetryScheduledFailure(error)
         cycle.firstFailure?.retryAt = canRetry ? retryAt : nil
         record(canRetry ? .checking : .failed, message: canRetry
-            ? (slowRecovery ? "인증 정보 접근 대기 중 · 5분 후 또는 잠금 해제 시 자동 재시도합니다." : "30초 후 세션 상태를 다시 확인합니다.")
+            ? (slowRecovery ? "복구 대기 중 · 5분 후 세션 상태를 다시 확인합니다." : "30초 후 세션 상태를 다시 확인합니다.")
             : hasUnconfirmedWarmup
                 ? "전송 결과 미확인: 다시 전송하지 않습니다. 상태 확인 또는 재전송을 선택해 주세요."
                 : "\(cycle.firstFailure!.message) · 복귀 또는 지금 워밍으로 재시도할 수 있습니다.")
@@ -716,6 +728,7 @@ final class AppState: ObservableObject {
     }
 
     private func diagnosticErrorCode(_ error: Error) -> String {
+        if let error = error as? URLError { return "network_\(error.code.rawValue)" }
         if error is ClaudeServiceError {
             return ClaudeService.diagnosticErrorCode(error)
         }
