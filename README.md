@@ -74,6 +74,8 @@
 
 개발 잔여물 정리는 `scripts/apply-cleanup-manifest.py`로 검토한 목록만 적용합니다. 기본 실행은 현재 앱 해시·프로세스·등록 항목·빈 전용 설정 도메인을 재확인하며, `--apply`를 붙였을 때만 정리합니다. 결과 JSON에 앱의 휴지통 위치와 설정 백업 경로를 기록합니다. 앱 복구는 해당 휴지통 항목을 원래 경로로 되돌리고, 설정 복구는 `defaults import <도메인> <백업 plist>`로 수행합니다. 운영 중인 앱과 귀속이 불분명한 일반 테스트 도메인은 정리 대상에서 제외합니다.
 
+메뉴 복구 화면은 `bash scripts/preview-recovery-menu.sh settings` (`runtime`, `future`도 지원)로 확인할 수 있습니다. 이 창의 설정·조회·로그인·워밍은 모두 시험용이며 운영 계정을 사용하지 않습니다. 상세 검증 결과와 아직 필요한 설치 환경은 [안정화 검증 결과](14_RELIABILITY_ACCEPTANCE.md)에 기록했습니다.
+
 ## 라이선스
 
 [MIT License](LICENSE)

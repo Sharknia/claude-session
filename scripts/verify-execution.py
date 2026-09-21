@@ -12,7 +12,7 @@ ROOT = pathlib.Path(__file__).resolve().parent.parent
 with tempfile.TemporaryDirectory(prefix="ClaudeSessionWarmerTests-Execution-") as temporary:
     work = pathlib.Path(temporary).resolve()
     executable = work / "probe"
-    subprocess.run(["swiftc", "-parse-as-library", "-swift-version", "6",
+    subprocess.run(["swiftc", "-parse-as-library", "-swift-version", "6", "-target", "arm64-apple-macos14.0",
                     str(ROOT / "Sources/ClaudeSessionWarmer/ExecutionOwnership.swift"),
                     str(ROOT / "scripts/VerifyExecution.swift"), "-o", str(executable)], check=True)
     processes = []

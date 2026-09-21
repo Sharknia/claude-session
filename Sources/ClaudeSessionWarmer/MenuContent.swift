@@ -124,8 +124,8 @@ struct MenuContent: View {
             HStack(spacing: 8) {
                 metricCard(
                     value: state.hasReadableCycle ? "\(state.handledWindowsToday)/3" : "확인 필요",
-                    label: "오늘 확인한 창",
-                    progress: Double(state.handledWindowsToday) / 3
+                    label: state.isRecoveryPausedToday ? "오늘 자동 워밍 중지" : "오늘 확인한 창",
+                    progress: state.hasReadableCycle ? Double(state.handledWindowsToday) / 3 : nil
                 )
                 metricCard(
                     value: usageValue,

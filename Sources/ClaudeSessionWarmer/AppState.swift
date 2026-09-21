@@ -35,6 +35,7 @@ final class AppState: ObservableObject {
     private let clock: @Sendable () -> Date
     private let confirmationSleep: @Sendable (Duration) async throws -> Void
     private let inspectClaude: @Sendable (String) async throws -> Inspection
+    private let loginClaude: @Sendable () async throws -> Inspection
     private let warmClaude: @Sendable (URL, String) async throws -> Void
     private var lifecycleMonitor: LifecycleMonitor?
     private var timer: WallClockTimer?
@@ -53,6 +54,7 @@ final class AppState: ObservableObject {
         executionCheck: @escaping @MainActor () -> String? = { nil },
         clock: @escaping @Sendable () -> Date = { Date() },
         inspectClaude: (@Sendable (String) async throws -> Inspection)? = nil,
+        loginClaude: (@Sendable () async throws -> Inspection)? = nil,
         warmClaude: (@Sendable (URL, String) async throws -> Void)? = nil,
         confirmationSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
@@ -64,6 +66,7 @@ final class AppState: ObservableObject {
         self.clock = clock
         self.confirmationSleep = confirmationSleep
         self.inspectClaude = inspectClaude ?? { try await Self.inspectManagedClaude(operationID: $0) }
+        self.loginClaude = loginClaude ?? { try await Self.loginManagedClaude() }
         self.warmClaude = warmClaude ?? { try await Self.runManagedWarmup(cliURL: $0, operationID: $1) }
         settings = store.loadSettings()
         cycle = savedCycle
@@ -161,7 +164,8 @@ final class AppState: ObservableObject {
     var storageIssue: StorageIssue? { store.issue }
     var canEditSettings: Bool { operationBlockReason == nil || store.canRepairSettings }
     var canRecoverRuntime: Bool { store.canRecoverRuntime }
-    var hasReadableCycle: Bool { store.hasReadableCycle && cycle.recoveryHoldDayKey != engine.dayKey(for: clock()) }
+    var isRecoveryPausedToday: Bool { cycle.recoveryHoldDayKey == engine.dayKey(for: clock()) }
+    var hasReadableCycle: Bool { store.hasReadableCycle && !isRecoveryPausedToday }
     var storageDirectory: URL? { store.directory }
 
     func reloadStoredState() {
@@ -221,7 +225,7 @@ final class AppState: ObservableObject {
         Task {
             defer { finishWorking() }
             do {
-                let inspection = try await Self.loginManagedClaude()
+                let inspection = try await loginClaude()
                 guard refreshExecutionPermission() else { return }
                 cacheQuota(inspection.quota)
                 connectionState = .connected
