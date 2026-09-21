@@ -28,10 +28,10 @@
 업데이트 목록 주소는 `https://github.com/Sharknia/claude-session/releases/latest/download/appcast.xml`이다. 이후 각 GitHub 릴리스에는 DMG와 서명된 `appcast.xml`을 함께 올려야 한다. 자동 생성 이후 XML을 편집하면 서명이 무효화되므로 재서명해야 한다.
 
 ```bash
-PROVISIONING_PROFILE=/path/to/ClaudeSessionWarmer.provisionprofile bash scripts/build-dmg.sh
+bash scripts/build-dmg.sh
 ```
 
-배포용 빌드는 앱·DMG 서명, 공증, stapling 후 `generate-appcast.sh`를 실행해 서명된 목록을 생성한다. 현재 브랜치의 출력은 `dist/ClaudeSessionWarmer-0.1.6.dmg`와 `dist/appcast.xml`이다. 0.1.6부터 앱의 Data Protection Keychain 권한을 허용하는 Developer ID 프로비저닝 프로필도 필요하다. 서명 키·공증 프로필·앱 프로비저닝 프로필에 접근하지 못하면 배포용 결과를 성공 처리하지 않는다.
+배포용 빌드는 앱·DMG 서명, 공증, stapling 후 `generate-appcast.sh`를 실행해 서명된 목록을 생성한다. 현재 브랜치의 출력은 `dist/ClaudeSessionWarmer-0.1.6.dmg`와 `dist/appcast.xml`이다. 0.1.6부터 앱의 Data Protection Keychain 권한을 허용하는 Developer ID 프로비저닝 프로필도 필요하다. 기존 Xcode 프로필을 자동 탐색·검증해 재사용하며, 다른 위치에 있을 때만 `PROVISIONING_PROFILE`로 경로를 지정한다. 서명 키·공증 프로필·앱 프로비저닝 프로필에 접근하지 못하면 배포용 결과를 성공 처리하지 않는다.
 
 별도 테스트 아카이브나 다른 다운로드 주소를 검증할 때는 다음 형식을 사용한다.
 

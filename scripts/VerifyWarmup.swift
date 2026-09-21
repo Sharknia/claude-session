@@ -15,11 +15,23 @@ struct VerifyWarmup {
                         service: "com.sharknia.ClaudeSessionWarmer.probe.\(UUID().uuidString)", account: "probe"
                     )
                     let store = ManagedCredentialStore(queries: queries)
-                    defer { _ = SecItemDelete(queries.cacheUpdateQuery() as CFDictionary) }
+                    defer {
+                        _ = SecItemDelete(queries.cacheUpdateQuery() as CFDictionary)
+                        _ = SecItemDelete(queries.cacheUpdateQuery(legacy: true) as CFDictionary)
+                    }
                     let credential = ManagedClaudeCredential(accessToken: "probe", refreshToken: "probe",
                                                              expiresAtMilliseconds: 0, scopes: [])
-                    try store.save(credential)
+                    var legacy = queries.cacheUpdateQuery(legacy: true)
+                    legacy[kSecValueData] = try JSONEncoder().encode(credential)
+                    let seedStatus = SecItemAdd(legacy as CFDictionary, nil)
+                    guard seedStatus == errSecSuccess else { throw ClaudeServiceError.credentialsUnavailable(seedStatus) }
                     guard try store.read() == credential else { throw ClaudeServiceError.credentialsUnavailable(errSecDecode) }
+                    let legacyStatus = SecItemCopyMatching(queries.cacheRead(legacy: true) as CFDictionary, nil)
+                    guard legacyStatus == errSecItemNotFound else { throw ClaudeServiceError.credentialsUnavailable(errSecDuplicateItem) }
+                    let rotated = ManagedClaudeCredential(accessToken: "probe-rotated", refreshToken: "probe-rotated",
+                                                          expiresAtMilliseconds: 1, scopes: [])
+                    try store.save(rotated)
+                    guard try store.read() == rotated else { throw ClaudeServiceError.credentialsUnavailable(errSecDecode) }
                     var query = queries.cacheUpdateQuery()
                     query[kSecReturnAttributes] = true
                     var result: CFTypeRef?
@@ -29,7 +41,7 @@ struct VerifyWarmup {
                           attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String else {
                         throw ClaudeServiceError.credentialsUnavailable(status == errSecSuccess ? errSecParam : status)
                     }
-                    print("result=storage_probe_pass; backend=data_protection; accessible=after_first_unlock_this_device_only")
+                    print("result=storage_probe_pass; backend=data_protection; migration=verified; rotation=verified; accessible=after_first_unlock_this_device_only")
                     return
                 }
                 if CommandLine.arguments.contains("--keychain-only") {

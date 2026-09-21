@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import copy
 import datetime
+import hashlib
 import importlib.util
 import pathlib
 import plistlib
@@ -45,6 +46,21 @@ class SigningTests(unittest.TestCase):
                     with self.assertRaises(ValueError):
                         signing.prepare(pathlib.Path("fixture"), output)
                 self.assertFalse(output.exists())
+            certificate = b"public certificate fixture"
+            fingerprint = hashlib.sha1(certificate).hexdigest().upper()
+            profile["DeveloperCertificates"] = [certificate]
+            with patch.object(signing.subprocess, "check_output", side_effect=[
+                plistlib.dumps(profile), f'1) {fingerprint} "Developer ID fixture"'.encode()
+            ]):
+                signing.prepare(pathlib.Path("fixture"), output, "Developer ID fixture")
+            self.assertTrue(output.exists())
+            output.unlink()
+            with patch.object(signing.subprocess, "check_output", side_effect=[
+                plistlib.dumps(profile), f'1) {"A" * 40} "Developer ID fixture"'.encode()
+            ]):
+                with self.assertRaises(ValueError):
+                    signing.prepare(pathlib.Path("fixture"), output, "Developer ID fixture")
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
