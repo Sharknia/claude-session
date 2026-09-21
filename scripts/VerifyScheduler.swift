@@ -38,7 +38,7 @@ private final class SchedulerSleepProbe {
     init(mode: String, delay: TimeInterval) {
         self.mode = mode
         target = Date().addingTimeInterval(mode == "late" ? -delay : delay)
-        defaults = UserDefaults(suiteName: suite)!
+        defaults = MemoryDefaults()
         let store = SettingsStore(defaults: defaults)
         let engine = ScheduleEngine()
         store.saveSettings(ScheduleSettings(firstWarmupMinutes: 0, weekdays: Set(1...7), excludeKoreanHolidays: false))

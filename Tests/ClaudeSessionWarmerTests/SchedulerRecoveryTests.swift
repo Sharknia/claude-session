@@ -333,7 +333,7 @@ private struct Fixture {
 
     init(offset: TimeInterval = 0, hold: Bool = false, error: ClaudeServiceError? = nil,
          active: Bool = true, warmupError: ClaudeServiceError? = nil) {
-        defaults = UserDefaults(suiteName: suite)!
+        defaults = MemoryDefaults()
         store = SettingsStore(defaults: defaults)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Seoul")!

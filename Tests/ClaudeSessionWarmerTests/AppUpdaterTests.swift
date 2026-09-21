@@ -6,7 +6,7 @@ import XCTest
 final class AppUpdaterTests: XCTestCase {
     func testInstallationWaitsForBackgroundRefresh() async throws {
         let suite = "AppUpdaterTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = MemoryDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
         let gate = UpdateInspectionGate()
         let state = AppState(store: SettingsStore(defaults: defaults), startScheduler: false,
@@ -52,7 +52,7 @@ final class AppUpdaterTests: XCTestCase {
 
     func testInstallationWaitsForWarmupAndResumesExactlyOnce() async throws {
         let suite = "AppUpdaterTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = MemoryDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
         let gate = UpdateInspectionGate()
         let state = AppState(store: SettingsStore(defaults: defaults), startScheduler: false,

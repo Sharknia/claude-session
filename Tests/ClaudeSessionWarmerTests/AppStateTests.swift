@@ -7,7 +7,7 @@ final class AppStateTests: XCTestCase {
     @MainActor
     func testStartupChecksCredentialsDespiteFreshCacheWithoutWarmingEarly() async throws {
         let suite = "AppStateTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = MemoryDefaults()
         defer { defaults.removePersistentDomain(forName: suite) }
         let store = SettingsStore(defaults: defaults)
         let now = Date()
@@ -224,7 +224,7 @@ final class AppStateTests: XCTestCase {
 
     private func withStore(_ body: (SettingsStore) -> Void) {
         let suiteName = "AppStateTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let defaults = MemoryDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         body(SettingsStore(defaults: defaults))
     }

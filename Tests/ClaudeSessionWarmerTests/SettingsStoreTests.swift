@@ -9,7 +9,7 @@ final class SettingsStoreTests: XCTestCase {
     override func setUp() {
         super.setUp()
         suiteName = "SettingsStoreTests.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)
+        defaults = MemoryDefaults()
     }
 
     override func tearDown() {
