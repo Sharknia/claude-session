@@ -8,6 +8,10 @@ struct VerifyScheduler {
     @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "concurrent" {
+            ConcurrentStorageProbe.run(Array(args.dropFirst()))
+            return
+        }
         guard args.count == 2, ["awake", "late", "before", "multiple", "after"].contains(args[0]),
               let seconds = Double(args[1]), seconds.isFinite, (5...3600).contains(seconds) else {
             print("사용법: verify-scheduler.sh <awake|late|before|multiple|after> <5~3600초>")
@@ -38,7 +42,7 @@ private final class SchedulerSleepProbe {
     init(mode: String, delay: TimeInterval) {
         self.mode = mode
         target = Date().addingTimeInterval(mode == "late" ? -delay : delay)
-        defaults = UserDefaults(suiteName: suite)!
+        defaults = MemoryDefaults()
         let store = SettingsStore(defaults: defaults)
         let engine = ScheduleEngine()
         store.saveSettings(ScheduleSettings(firstWarmupMinutes: 0, weekdays: Set(1...7), excludeKoreanHolidays: false))

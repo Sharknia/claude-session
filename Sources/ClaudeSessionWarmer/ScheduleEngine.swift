@@ -74,10 +74,12 @@ struct ScheduleEngine: Sendable {
         settings: ScheduleSettings,
         cycle: DailyCycle
     ) -> ScheduledEvent? {
+        guard (try? settings.validate()) != nil, (try? cycle.validate()) != nil else { return nil }
         let today = dayKey(for: now)
         let sameDay = cycle.dayKey == today
         let count = sameDay ? cycle.handledWindows : 0
-        if let first = firstWarmup(on: now, settings: settings), count < Self.maximumWindowsPerDay {
+        if cycle.recoveryHoldDayKey != today,
+           let first = firstWarmup(on: now, settings: settings), count < Self.maximumWindowsPerDay {
             let target = count == 0 ? first : (cycle.nextResetAt ?? first)
             let failure = sameDay ? cycle.firstFailure : nil
             let paused = failure?.targetAt == target && failure?.retryAt == nil

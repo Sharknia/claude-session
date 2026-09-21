@@ -6,8 +6,26 @@ import Security
 @main
 struct VerifyWarmup {
     static func main() async {
+        let arguments = Array(CommandLine.arguments.dropFirst())
+        let modes = Set(arguments)
+        guard arguments == ["--storage-probe"] || arguments == ["--keychain-only"]
+                || arguments == ["--warmup"]
+                || (arguments.count == 2 && modes == ["--warmup", "--allow-active"]) else {
+            print("사용법: --storage-probe | --keychain-only | --warmup [--allow-active]")
+            exit(2)
+        }
+        print("verification_pid=\(ProcessInfo.processInfo.processIdentifier)")
         let operationID = UUID().uuidString
+        var ownership: ExecutionOwnership?
+        defer { withExtendedLifetime(ownership) {} }
         do {
+            if !modes.contains("--storage-probe") {
+                guard LegacyAppProcess.running().isEmpty else {
+                    print("result=blocked; reason=legacy_app_running; no_account_access=true")
+                    exit(2)
+                }
+                ownership = try ExecutionOwnership(directory: InstallationPolicy.dataDirectory)
+            }
             try await DiagnosticContext.$operationID.withValue(operationID) {
                 if CommandLine.arguments.contains("--storage-probe") {
                     // 실제 계정과 분리한 임시 항목으로 서명·저장 위치·접근 정책을 검증한다.
@@ -77,6 +95,9 @@ struct VerifyWarmup {
                 }
                 throw ClaudeServiceError.warmupFailed
             }
+        } catch ExecutionOwnership.Failure.alreadyRunning {
+            print("result=blocked; reason=app_owns_execution; no_account_access=true")
+            exit(2)
         } catch {
             print("result=failed error=\(ClaudeService.diagnosticErrorCode(error))")
             DiagnosticLogger.shared.flush()

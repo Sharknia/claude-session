@@ -304,7 +304,7 @@ final class ScheduledIntegrationTests: XCTestCase {
 
     private func fixture() -> (SettingsStore, ScheduleEngine, Date, () -> Void) {
         let suite = "ScheduledIntegrationTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suite)!
+        let defaults = MemoryDefaults()
         let store = SettingsStore(defaults: defaults)
         var calendar = Calendar(identifier: .gregorian)
         calendar.timeZone = TimeZone(identifier: "Asia/Seoul")!

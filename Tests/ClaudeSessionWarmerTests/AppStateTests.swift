@@ -5,6 +5,33 @@ import Security
 
 final class AppStateTests: XCTestCase {
     @MainActor
+    func testStartupChecksCredentialsDespiteFreshCacheWithoutWarmingEarly() async throws {
+        let suite = "AppStateTests.\(UUID().uuidString)"
+        let defaults = MemoryDefaults()
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let store = SettingsStore(defaults: defaults)
+        let now = Date()
+        let engine = ScheduleEngine()
+        store.saveSettings(ScheduleSettings(firstWarmupMinutes: 360, weekdays: Set(1...7), excludeKoreanHolidays: false))
+        // 실제 타이머는 내일로 예약해 테스트 중 워밍 콜백이 발생하지 않는다.
+        store.saveDailyCycle(DailyCycle(dayKey: engine.dayKey(for: now), handledWindows: 3))
+        store.saveQuotaCache(QuotaCache(quota: QuotaWindow(active: true, resetsAt: now.addingTimeInterval(3600)), fetchedAt: now))
+        let state = AppState(store: store, engine: engine, startScheduler: true,
+                             inspectClaude: { _ in throw ClaudeServiceError.credentialsUnavailable(errSecAuthFailed) },
+                             warmClaude: { _, _ in XCTFail("시작 점검은 워밍하지 않아야 한다") })
+        let target = state.nextEvent?.targetAt
+        for _ in 0..<100 {
+            if !state.isSilentRefreshRunning { break }
+            try await Task.sleep(for: .milliseconds(10))
+        }
+        XCTAssertFalse(state.isSilentRefreshRunning)
+        guard case .failed = state.connectionState else { return XCTFail("실제 접근 실패를 캐시로 숨기면 안 된다") }
+        XCTAssertEqual(state.nextEvent?.targetAt, target)
+        XCTAssertEqual(state.cycle.handledWindows, 3)
+        XCTAssertFalse(state.hasUnconfirmedWarmup)
+    }
+
+    @MainActor
     func testExistingSatisfiedRecordUsesUpdatedDisplayWithoutChangingHistory() {
         withStore { store in
             let record = WarmupRecord(timestamp: Date(), status: .satisfied, message: "이미 열린 창을 확인했습니다.")
@@ -125,7 +152,7 @@ final class AppStateTests: XCTestCase {
     }
 
     @MainActor
-    func testFailuresRemainPendingAndRetriesAreBoundedAcrossRestart() {
+    func testFailuresKeepSlowRecoveryAcrossRestart() {
         withStore { store in
             let calendar = seoulCalendar()
             let engine = ScheduleEngine(calendar: calendar)
@@ -147,14 +174,14 @@ final class AppStateTests: XCTestCase {
                     XCTAssertEqual(state.nextEvent?.date, now.addingTimeInterval(30))
                     XCTAssertEqual(state.nextEvent?.windowNumber, 1)
                 } else {
-                    XCTAssertEqual(state.status, .failed)
-                    XCTAssertNil(state.cycle.firstFailure?.retryAt)
-                    XCTAssertEqual(state.nextEvent?.dayKey, "2026-09-08")
+                    XCTAssertEqual(state.status, .checking)
+                    XCTAssertEqual(state.cycle.firstFailure?.retryAt, now.addingTimeInterval(300))
+                    XCTAssertEqual(state.nextEvent?.dayKey, "2026-09-07")
                 }
             }
             let restarted = AppState(store: store, engine: engine, startScheduler: false, clock: { target.addingTimeInterval(14_000) })
             restarted.reconcileSchedule(reason: "clock_changed")
-            XCTAssertEqual(restarted.nextEvent?.dayKey, "2026-09-08")
+            XCTAssertEqual(restarted.nextEvent?.dayKey, "2026-09-07")
             XCTAssertEqual(restarted.cycle.firstFailure?.attempts, 4)
             restarted.reconcileSchedule(reason: "system_wake")
             XCTAssertEqual(restarted.nextEvent?.dayKey, "2026-09-07")
@@ -197,7 +224,7 @@ final class AppStateTests: XCTestCase {
 
     private func withStore(_ body: (SettingsStore) -> Void) {
         let suiteName = "AppStateTests.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName)!
+        let defaults = MemoryDefaults()
         defer { defaults.removePersistentDomain(forName: suiteName) }
         body(SettingsStore(defaults: defaults))
     }

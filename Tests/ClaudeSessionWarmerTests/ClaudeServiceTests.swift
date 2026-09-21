@@ -302,6 +302,30 @@ final class ClaudeServiceTests: XCTestCase {
         }
     }
 
+    func testCLILookupCannotWaitForeverForLoginShell() throws {
+        let executable = try makeExecutable("#!/bin/sh\nexec /bin/sleep 5\n")
+        let startedAt = ContinuousClock.now
+        XCTAssertThrowsError(try ClaudeService().run(executable: executable, arguments: [], timeout: 0.1)) {
+            XCTAssertEqual($0 as? ClaudeServiceError, .cliLookupTimedOut)
+        }
+        XCTAssertLessThan(startedAt.duration(to: .now), .seconds(3))
+    }
+
+    func testCLILookupDiscardsLargeStderrWithoutBlockingStdout() throws {
+        let executable = try makeExecutable("""
+        #!/bin/sh
+        i=0
+        while [ "$i" -lt 12000 ]; do
+          printf 'login shell warning that must not block path lookup\\n' >&2
+          i=$((i + 1))
+        done
+        printf '/fixture/claude\\n'
+        """)
+        let result = try ClaudeService().run(executable: executable, arguments: [], timeout: 3)
+        XCTAssertEqual(result.status, 0)
+        XCTAssertEqual(String(decoding: result.stdout, as: UTF8.self), "/fixture/claude\n")
+    }
+
     private func makeExecutable(_ contents: String) throws -> URL {
         let directory = FileManager.default.temporaryDirectory
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
