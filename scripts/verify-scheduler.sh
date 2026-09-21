@@ -16,6 +16,7 @@ swiftc -parse-as-library -swift-version 6 \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ManagedCredentialStore.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/AppState.swift" \
   "$SCHEDULER_ROOT/Tests/ClaudeSessionWarmerTests/MemoryDefaults.swift" \
+  "$SCHEDULER_ROOT/scripts/VerifyConcurrentStorage.swift" \
   "$SCHEDULER_ROOT/scripts/VerifyScheduler.swift" \
   -o "$SCHEDULER_VERIFY_DIR/ClaudeSessionWarmerTests-SleepProbe"
 if [[ "${1:-}" == "--build-only" ]]; then

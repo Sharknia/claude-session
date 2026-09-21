@@ -1,14 +1,21 @@
 #!/bin/bash
 set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
-VERIFY_DIR="$ROOT_DIR/.build/warmup-verification"
+VERIFY_TEMP_ROOT="${TMPDIR:-/tmp}"
+VERIFY_DIR="$(mktemp -d "${VERIFY_TEMP_ROOT%/}/ClaudeSessionWarmerTests-Warmup.XXXXXX")"
 VERIFY_APP="$VERIFY_DIR/VerifyWarmup.app"
 VERIFY_EXECUTABLE="$VERIFY_APP/Contents/MacOS/ClaudeSessionWarmerTests-VerifyWarmup"
 KEYCHAIN_PROFILE="$ROOT_DIR/.build/signing/embedded.provisionprofile"
 KEYCHAIN_ENTITLEMENTS="$ROOT_DIR/.build/signing/keychain.entitlements"
 CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: HakKyeol Lee (V9SQZ6B7RP)}"
+cleanup() {
+  # 실제 제품 ID로 검증하므로 생성한 경로의 앱 등록만 해제한다.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -u "$VERIFY_APP" >/dev/null 2>&1 || true
+  rm -rf -- "$VERIFY_DIR"
+}
+trap cleanup EXIT
 python3 "$ROOT_DIR/scripts/prepare-keychain-signing.py" "${PROVISIONING_PROFILE:-auto}" "$KEYCHAIN_ENTITLEMENTS" --identity "$CODESIGN_IDENTITY" --embed "$KEYCHAIN_PROFILE"
-rm -rf -- "$VERIFY_APP"
 mkdir -p "$VERIFY_APP/Contents/MacOS"
 cp "$ROOT_DIR/packaging/Info.plist" "$VERIFY_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set CFBundleExecutable ClaudeSessionWarmerTests-VerifyWarmup' "$VERIFY_APP/Contents/Info.plist"

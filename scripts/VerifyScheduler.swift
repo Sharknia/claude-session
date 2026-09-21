@@ -8,6 +8,10 @@ struct VerifyScheduler {
     @MainActor
     static func main() {
         let args = Array(CommandLine.arguments.dropFirst())
+        if args.first == "concurrent" {
+            ConcurrentStorageProbe.run(Array(args.dropFirst()))
+            return
+        }
         guard args.count == 2, ["awake", "late", "before", "multiple", "after"].contains(args[0]),
               let seconds = Double(args[1]), seconds.isFinite, (5...3600).contains(seconds) else {
             print("사용법: verify-scheduler.sh <awake|late|before|multiple|after> <5~3600초>")
