@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import Security
 import ServiceManagement
 import UserNotifications
 
@@ -206,6 +207,9 @@ final class AppState: ObservableObject {
                 let inspection = try await Self.inspectManagedClaude()
                 cacheQuota(inspection.quota)
                 connectionState = .connected
+                if cycle.firstFailure?.keychainAccessFailure == true {
+                    reconcileSchedule(reason: "credential_available")
+                }
             } catch {
                 if let serviceError = error as? ClaudeServiceError,
                    serviceError != .quotaRateLimited,
@@ -314,7 +318,11 @@ final class AppState: ObservableObject {
     /// 복귀 시 남은 시간을 다시 계산하되, 유효한 재시도 시각은 앞당기지 않는다.
     func reconcileSchedule(reason: String) {
         scheduleRevision += 1
-        if ["system_wake", "startup", "login_completed"].contains(reason),
+        if ["screen_unlocked", "credential_available"].contains(reason),
+           cycle.firstFailure?.keychainAccessFailure == true {
+            cycle.firstFailure?.retryAt = clock()
+            store.saveDailyCycle(cycle)
+        } else if ["system_wake", "startup", "login_completed", "screen_unlocked"].contains(reason),
            cycle.firstFailure != nil, cycle.firstFailure?.retryAt == nil {
             cycle.firstFailure?.retryAt = clock()
             store.saveDailyCycle(cycle)
@@ -609,10 +617,21 @@ final class AppState: ObservableObject {
             case .warmupNotStarted, .warmupTimedOut, .warmupFailed:
                 // 이미 전송됐을 수 있다. 기존 중복 방지에 따라 후속 시도는 사용량만 확인한다.
                 return true
+            case .credentialsUnavailable:
+                return isRecoverableKeychainFailure(error)
             default: return false
             }
         }
         return error is AppStateError || error is URLError
+    }
+
+    static func isRecoverableKeychainFailure(_ error: Error) -> Bool {
+        guard case let .credentialsUnavailable(status) = error as? ClaudeServiceError else { return false }
+        // 설정·권한 누락과 데이터 파손은 반복해도 회복되지 않으므로 별도로 남긴다.
+        return [errSecNotAvailable, errSecAuthFailed, errSecInteractionNotAllowed,
+                errSecInteractionRequired, errSecInDarkWake,
+                OSStatus(CSSMERR_CSP_OPERATION_AUTH_DENIED),
+                OSStatus(CSSMERR_CSP_NO_USER_INTERACTION)].contains(status)
     }
 
     func handleTargetFailure(_ error: Error, event: ScheduledEvent, at date: Date? = nil) {
@@ -625,11 +644,15 @@ final class AppState: ObservableObject {
         }
         let attempts = (cycle.firstFailure?.attempts ?? 0) + 1
         cycle.firstFailure?.attempts = attempts
-        let retryAt = now.addingTimeInterval(30)
-        let canRetry = Self.shouldRetryScheduledFailure(error) && attempts <= 3
+        let keychainAccessFailure = Self.isRecoverableKeychainFailure(error)
+        cycle.firstFailure?.keychainAccessFailure = keychainAccessFailure
+        // 인증 접근이 일시 거부되면 당일 작업을 버리지 않고 느린 재확인을 유지한다.
+        let slowRecovery = keychainAccessFailure && attempts > 3
+        let retryAt = now.addingTimeInterval(slowRecovery ? 300 : 30)
+        let canRetry = Self.shouldRetryScheduledFailure(error) && (attempts <= 3 || keychainAccessFailure)
         cycle.firstFailure?.retryAt = canRetry ? retryAt : nil
         record(canRetry ? .checking : .failed, message: canRetry
-            ? "30초 후 세션 상태를 다시 확인합니다."
+            ? (slowRecovery ? "인증 정보 접근 대기 중 · 5분 후 또는 잠금 해제 시 자동 재시도합니다." : "30초 후 세션 상태를 다시 확인합니다.")
             : hasUnconfirmedWarmup
                 ? "전송 결과 미확인: 다시 전송하지 않습니다. 상태 확인 또는 재전송을 선택해 주세요."
                 : "\(cycle.firstFailure!.message) · 복귀 또는 지금 워밍으로 재시도할 수 있습니다.")

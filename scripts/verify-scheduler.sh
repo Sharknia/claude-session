@@ -11,6 +11,7 @@ swiftc -parse-as-library -swift-version 6 \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/DiagnosticLogger.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ClaudeOAuthLoopback.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ClaudeService.swift" \
+  "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ManagedCredentialStore.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/AppState.swift" \
   "$SCHEDULER_ROOT/scripts/VerifyScheduler.swift" \
   -o "$SCHEDULER_VERIFY_DIR/ClaudeSessionWarmerTests-SleepProbe"
