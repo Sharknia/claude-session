@@ -1,4 +1,5 @@
 import Foundation
+import Security
 
 /// 앱과 같은 서명으로 빌드해 실제 Keychain과 서비스 코드를 검증한다.
 /// 토큰, 프롬프트, CLI 출력은 기록하지 않는다.
@@ -8,6 +9,34 @@ struct VerifyWarmup {
         let operationID = UUID().uuidString
         do {
             try await DiagnosticContext.$operationID.withValue(operationID) {
+                if CommandLine.arguments.contains("--storage-probe") {
+                    // 실제 계정과 분리한 임시 항목으로 서명·저장 위치·접근 정책을 검증한다.
+                    let queries = ClaudeCredentialQueries(
+                        service: "com.sharknia.ClaudeSessionWarmer.probe.\(UUID().uuidString)", account: "probe"
+                    )
+                    let store = ManagedCredentialStore(queries: queries)
+                    defer { _ = SecItemDelete(queries.cacheUpdateQuery() as CFDictionary) }
+                    let credential = ManagedClaudeCredential(accessToken: "probe", refreshToken: "probe",
+                                                             expiresAtMilliseconds: 0, scopes: [])
+                    try store.save(credential)
+                    guard try store.read() == credential else { throw ClaudeServiceError.credentialsUnavailable(errSecDecode) }
+                    var query = queries.cacheUpdateQuery()
+                    query[kSecReturnAttributes] = true
+                    var result: CFTypeRef?
+                    let status = SecItemCopyMatching(query as CFDictionary, &result)
+                    guard status == errSecSuccess,
+                          let attributes = result as? [String: Any],
+                          attributes[kSecAttrAccessible as String] as? String == kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly as String else {
+                        throw ClaudeServiceError.credentialsUnavailable(status == errSecSuccess ? errSecParam : status)
+                    }
+                    print("result=storage_probe_pass; backend=data_protection; accessible=after_first_unlock_this_device_only")
+                    return
+                }
+                if CommandLine.arguments.contains("--keychain-only") {
+                    _ = try ManagedCredentialStore().read()
+                    print("result=managed_credential_read_pass; no_http_request=true")
+                    return
+                }
                 let service = ClaudeService()
                 let before = try await service.fetchManagedQuota()
                 print("operation_id=\(operationID)")

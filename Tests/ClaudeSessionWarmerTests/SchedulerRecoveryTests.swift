@@ -1,9 +1,45 @@
 import AppKit
+import Security
 import XCTest
 @testable import ClaudeSessionWarmer
 
 @MainActor
 final class SchedulerRecoveryTests: XCTestCase {
+    func testKeychainFailureKeepsTodaysTargetAfterFastRetriesAndRecoversOnUnlock() async throws {
+        let f = Fixture(error: .credentialsUnavailable(errSecAuthFailed), active: false)
+        defer { f.cleanup() }
+        var state = f.makeState()
+        state.handle(f.event)
+        try await finish(state)
+        for _ in 0..<3 {
+            f.clock.set(try XCTUnwrap(state.nextEvent?.date))
+            state.handle(try XCTUnwrap(state.nextEvent))
+            try await finish(state)
+        }
+        XCTAssertEqual(state.cycle.firstFailure?.attempts, 4)
+        XCTAssertEqual(state.nextEvent?.targetAt, f.target)
+        XCTAssertEqual(state.nextEvent?.date, f.clock.now().addingTimeInterval(300))
+        XCTAssertEqual(state.cycle.handledWindows, 0)
+        let failedWarmups = await f.backend.warmups
+        XCTAssertEqual(failedWarmups, 0)
+
+        state = f.makeState() // 저장된 복구 상태는 재시작 뒤에도 유지한다.
+        f.clock.set(f.clock.now().addingTimeInterval(10))
+        await f.backend.clearError()
+        state.reconcileSchedule(reason: "screen_unlocked")
+        XCTAssertEqual(state.nextEvent?.date, f.clock.now())
+        let event = try XCTUnwrap(state.nextEvent)
+        let id = try XCTUnwrap(state.scheduledTimerID)
+        state.receiveTimerCallback(event, id: id, callbackAt: f.clock.now())
+        try await finish(state)
+        state.receiveTimerCallback(event, id: id, callbackAt: f.clock.now())
+        XCTAssertEqual(state.status, .succeeded)
+        XCTAssertNil(state.cycle.firstFailure)
+        XCTAssertEqual(state.cycle.handledWindows, 1)
+        let warmups = await f.backend.warmups
+        XCTAssertEqual(warmups, 1)
+    }
+
     func testWeekendAndRepeatedWakeKeepMondayTarget() throws {
         let f = Fixture(offset: -62 * 3600)
         defer { f.cleanup() }
@@ -284,7 +320,7 @@ private final class RecoveryClock: @unchecked Sendable {
 private actor RecoveryBackend {
     private let reset: Date
     private let hold: Bool
-    private let error: ClaudeServiceError?
+    private var error: ClaudeServiceError?
     private var active: Bool
     private(set) var warmups = 0
     private var continuation: CheckedContinuation<Void, Never>?
@@ -309,4 +345,5 @@ private actor RecoveryBackend {
     func warm() { warmups += 1; active = true }
 
     func release() { continuation?.resume(); continuation = nil }
+    func clearError() { error = nil }
 }

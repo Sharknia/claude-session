@@ -192,13 +192,20 @@ func diagnosticDate(_ date: Date?) -> String {
 }
 
 final class LifecycleMonitor {
+    private let workspaceCenter: NotificationCenter
+    private let distributedCenter: NotificationCenter
     private var workspaceObservers: [NSObjectProtocol] = []
     private var distributedObservers: [NSObjectProtocol] = []
     private var applicationObservers: [NSObjectProtocol] = []
     private let heartbeat = DispatchSource.makeTimerSource(queue: .global(qos: .utility))
 
-    init(onScheduleChange: @escaping @Sendable (String) -> Void = { _ in }) {
-        let workspaceCenter = NSWorkspace.shared.notificationCenter
+    init(
+        workspaceCenter: NotificationCenter = NSWorkspace.shared.notificationCenter,
+        distributedCenter: NotificationCenter = DistributedNotificationCenter.default(),
+        onScheduleChange: @escaping @Sendable (String) -> Void = { _ in }
+    ) {
+        self.workspaceCenter = workspaceCenter
+        self.distributedCenter = distributedCenter
         for (name, event, critical) in [
             (NSWorkspace.willSleepNotification, "power.system_sleep", true),
             (NSWorkspace.didWakeNotification, "power.system_wake", false),
@@ -221,7 +228,6 @@ final class LifecycleMonitor {
             })
         }
 
-        let distributedCenter = DistributedNotificationCenter.default()
         for (name, event) in [
             (Notification.Name("com.apple.screenIsLocked"), "power.screen_locked"),
             (Notification.Name("com.apple.screenIsUnlocked"), "power.screen_unlocked")
@@ -232,6 +238,9 @@ final class LifecycleMonitor {
                 queue: nil
             ) { _ in
                 diagnosticLog(event)
+                if name.rawValue == "com.apple.screenIsUnlocked" {
+                    onScheduleChange("screen_unlocked")
+                }
             })
         }
 
@@ -261,9 +270,7 @@ final class LifecycleMonitor {
 
     deinit {
         heartbeat.cancel()
-        let workspaceCenter = NSWorkspace.shared.notificationCenter
         workspaceObservers.forEach(workspaceCenter.removeObserver)
-        let distributedCenter = DistributedNotificationCenter.default()
         distributedObservers.forEach(distributedCenter.removeObserver)
         applicationObservers.forEach(NotificationCenter.default.removeObserver)
     }

@@ -1,13 +1,13 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.5-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.6-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 정해진 시각부터 Claude Code의 5시간 사용량 창을 준비하는 macOS 메뉴바 앱입니다. 업무 시작 전에 첫 창을 열고, 실제 리셋 시각에 맞춰 후속 창을 관리합니다.
 
-> 0.1.5부터 잠자기·앱 종료로 지연된 당일 예약을 복구합니다. 이미 활성인 창과 미확인 전송을 확인해 중복 워밍을 방지합니다.
+> 0.1.6은 잠금 중 인증 정보 접근과 실패 후 자동 복구를 보강합니다. 기존 앱 인증 정보는 새 저장소에서 재확인한 뒤 이전하며, 일시적인 접근 실패로 당일 예약을 포기하지 않습니다.
 
 ## 주요 기능
 
@@ -53,10 +53,10 @@
 - 화면 잠금이나 디스플레이 꺼짐과 시스템 잠자기는 다릅니다. 예약 실행을 위해 Mac이 깨어 있고 인터넷에 연결돼 있어야 합니다.
 - 예약 전에 잠들었다가 예정 시각 전에 깨어나면 원래 예약 시각을 유지합니다. 잠들었던 시간만큼 예약이 뒤로 밀리지 않도록 복귀 시 일정을 다시 계산합니다.
 - 잠자기나 앱 종료로 늦어진 당일 예약은 복귀·앱 시작·지연 콜백에서 현재 세션을 확인한 뒤 처리합니다. 전날 예약을 몰아서 실행하지 않으며 Mac을 강제로 깨우지는 않습니다.
-- 일시 실패는 30초 간격으로 최대 3회 추가 재시도합니다. 계속 실패하면 원인을 표시하고 복귀 또는 `지금 워밍`에서 다시 확인합니다.
+- 일시 실패는 30초 간격으로 최대 3회 추가 재시도합니다. 인증 정보 접근이 일시적으로 거부되면 이후에도 당일 예약을 유지해 5분 간격으로 확인하고, 화면 잠금 해제 시 바로 재시도합니다. 그 밖의 지속적인 실패는 원인을 표시합니다.
 - 전송 결과가 불명확하면 자동 재전송하지 않습니다. 필요하면 `미확인 전송을 해제하고 다시 워밍…`에서 별도로 확인할 수 있습니다.
 - 구버전에서 업데이트한 당일에는 기존 처리 수를 상한으로 보존합니다. 새 집계는 다음 실행일부터 적용돼 도입 당일 목표가 조기 종료될 수 있습니다.
-- 앱은 Claude Code의 인증 정보와 별도로 계정을 연결합니다. 인증 정보는 앱 전용 macOS Keychain에 저장합니다.
+- 앱은 Claude Code의 인증 정보와 별도로 계정을 연결합니다. 인증 정보는 앱 전용 macOS Data Protection Keychain에 저장하며, Mac 재시작 후 첫 로그인부터 접근할 수 있습니다.
 - Anthropic의 공식 앱이나 공식 승인된 제3자 OAuth 통합은 아닙니다. Claude의 인증 방식이나 서비스 정책 변경에 영향을 받을 수 있습니다.
 
 ## 라이선스
