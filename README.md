@@ -76,6 +76,8 @@
 
 메뉴 복구 화면은 `bash scripts/preview-recovery-menu.sh settings` (`runtime`, `future`도 지원)로 확인할 수 있습니다. 이 창의 설정·조회·로그인·워밍은 모두 시험용이며 운영 계정을 사용하지 않습니다. 상세 검증 결과와 아직 필요한 설치 환경은 [안정화 검증 결과](14_RELIABILITY_ACCEPTANCE.md)에 기록했습니다.
 
+Keychain 검증은 `bash scripts/verify-warmup.sh --storage-probe`로 분리된 임시 항목만 사용합니다. 실제 계정으로 확인하려면 `--keychain-only` 또는 `--warmup`을 명시해야 하며, 다른 제품 인스턴스가 실행 중이면 계정에 접근하지 않습니다. 인수 없는 실행은 워밍하지 않고 종료합니다.
+
 ## 라이선스
 
 [MIT License](LICENSE)

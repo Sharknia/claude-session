@@ -66,7 +66,10 @@ final class SettingsStore {
     func loadDailyCycle() -> DailyCycle { hasReadableCycle ? cycle : DailyCycle() }
 
     var canRepairSettings: Bool { issue?.area == .settings && issue?.kind == .corrupt }
-    var canRecoverRuntime: Bool { issue?.area == .runtime && issue?.kind == .corrupt && hasReadableSettings }
+    var canRecoverRuntime: Bool {
+        issue?.kind == .corrupt && hasReadableSettings
+            && (issue?.area == .runtime || (issue?.area == .migration && hasReadableCycle))
+    }
 
     @discardableResult
     func reload() -> Bool {
@@ -109,6 +112,16 @@ final class SettingsStore {
         if issue == nil { return true }
         guard canRecoverRuntime else { return false }
         do {
+            if issue?.area == .migration {
+                // 이전 메타데이터만 손상된 경우 검증된 현재 실행 기록까지 되돌리지 않는다.
+                if let damaged = try readFile(Self.migrationFile) {
+                    try writeFile(damaged, name: "migration-damaged-\(UUID().uuidString).json")
+                }
+                try writeRecord(Migration(completed: true, settings: settings, cycle: cycle,
+                                          originalSettings: nil, originalCycle: nil), file: Self.migrationFile)
+                prepare()
+                return issue == nil
+            }
             var recovered = DailyCycle()
             if let backup = try readFile(Self.backupFile) {
                 do {

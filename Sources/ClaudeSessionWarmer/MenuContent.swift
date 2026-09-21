@@ -88,7 +88,9 @@ struct MenuContent: View {
                                 Button("취소", role: .cancel) {}
                                 Button("원본 보존 후 복구") { state.recoverRuntime() }
                             } message: {
-                                Text("기존 파일을 보존합니다. 마지막 전송 결과가 불확실하므로 오늘 자동 워밍을 중지하고 미확인 전송 상태를 유지합니다. 복구 후 상태 확인 또는 재전송을 선택할 수 있습니다.")
+                                Text(state.storageIssue?.area == .migration
+                                     ? "손상 원본을 보존하고 확인된 예약과 실행 기록을 그대로 유지합니다. 복구 후 기존 예약을 재개합니다."
+                                     : "기존 파일을 보존합니다. 마지막 전송 결과가 불확실하므로 오늘 자동 워밍을 중지하고 미확인 전송 상태를 유지합니다. 복구 후 상태 확인 또는 재전송을 선택할 수 있습니다.")
                             }
                     }
                 }.disabled(state.hasActiveOperation)

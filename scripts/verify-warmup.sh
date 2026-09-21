@@ -22,6 +22,7 @@ cp "$ROOT_DIR/packaging/Info.plist" "$VERIFY_APP/Contents/Info.plist"
 /usr/libexec/PlistBuddy -c 'Set CFBundleExecutable ClaudeSessionWarmerTests-VerifyWarmup' "$VERIFY_APP/Contents/Info.plist"
 cp "$KEYCHAIN_PROFILE" "$VERIFY_APP/Contents/embedded.provisionprofile"
 swiftc -parse-as-library -swift-version 6 -target arm64-apple-macos14.0 \
+  "$ROOT_DIR/Sources/ClaudeSessionWarmer/ExecutionOwnership.swift" \
   "$ROOT_DIR/Sources/ClaudeSessionWarmer/Models.swift" \
   "$ROOT_DIR/Sources/ClaudeSessionWarmer/DiagnosticLogger.swift" \
   "$ROOT_DIR/Sources/ClaudeSessionWarmer/ClaudeOAuthLoopback.swift" \

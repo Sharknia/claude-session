@@ -294,6 +294,28 @@ final class StorageReliabilityTests: XCTestCase {
         XCTAssertEqual(state.cycle, pending)
     }
 
+    func testCorruptMigrationMetadataRecoveryKeepsCurrentRecords() throws {
+        let defaults = MemoryDefaults()
+        let original = SettingsStore(defaults: defaults)
+        let cycle = DailyCycle(dayKey: "2026-09-21", handledWindows: 2, lastWarmupTargetAt: Date())
+        XCTAssertTrue(original.saveDailyCycle(cycle))
+        let settingsData = defaults.data(forKey: SettingsStore.settingsKey)
+        let runtimeData = defaults.data(forKey: "isolated.\(SettingsStore.runtimeFile)")
+        let damaged = Data("broken migration metadata".utf8)
+        defaults.set(damaged, forKey: "isolated.\(SettingsStore.migrationFile)")
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.issue?.area, .migration)
+        XCTAssertTrue(store.canRecoverRuntime)
+        XCTAssertTrue(store.recoverRuntime(at: Date(), dayKey: "2026-09-21"))
+        XCTAssertNil(store.issue)
+        XCTAssertEqual(store.loadDailyCycle(), cycle)
+        XCTAssertEqual(defaults.data(forKey: SettingsStore.settingsKey), settingsData)
+        XCTAssertEqual(defaults.data(forKey: "isolated.\(SettingsStore.runtimeFile)"), runtimeData)
+        let originals = defaults.dictionaryRepresentation().filter { $0.key.contains("migration-damaged-") }
+        XCTAssertEqual(originals.count, 1)
+        XCTAssertEqual(originals.values.first as? Data, damaged)
+    }
+
     @MainActor
     private func waitUntilFinished(_ state: AppState) async throws {
         for _ in 0..<100 {

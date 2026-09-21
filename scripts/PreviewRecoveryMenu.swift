@@ -7,8 +7,8 @@ import SwiftUI
 struct PreviewRecoveryMenu {
     @MainActor
     static func main() {
-        let scenario = CommandLine.arguments.dropFirst().first ?? "settings"
-        guard ["settings", "runtime", "future"].contains(scenario) else { exit(2) }
+        guard let scenario = CommandLine.arguments.dropFirst().first,
+              ["settings", "runtime", "future"].contains(scenario) else { exit(2) }
         let defaults = MemoryDefaults()
         let seed = SettingsStore(defaults: defaults)
         seed.saveDailyCycle(DailyCycle(dayKey: ScheduleEngine().dayKey(for: Date()), handledWindows: 1))
