@@ -15,10 +15,9 @@ readonly DMG_LAYOUT="$PROJECT_DIR/packaging/dmg/Finder.DS_Store"
 readonly DMG_STAGING="$DIST_DIR/.dmg-staging"
 readonly REQUIREMENTS_FILE="$PROJECT_DIR/packaging/designated-requirement.txt"
 readonly CODESIGN_IDENTITY="${CODESIGN_IDENTITY:-Developer ID Application: HakKyeol Lee (V9SQZ6B7RP)}"
-readonly KEYCHAIN_PROFILE="${PROVISIONING_PROFILE:-$PROJECT_DIR/packaging/ClaudeSessionWarmer.provisionprofile}"
+readonly KEYCHAIN_PROFILE="$PROJECT_DIR/.build/signing/embedded.provisionprofile"
 readonly KEYCHAIN_ENTITLEMENTS="$PROJECT_DIR/.build/signing/keychain.entitlements"
-[[ -f "$KEYCHAIN_PROFILE" ]] || { echo "오류: 이 앱의 Developer ID 프로필 경로를 PROVISIONING_PROFILE로 지정해 주세요." >&2; exit 1; }
-python3 "$SCRIPT_DIR/prepare-keychain-signing.py" "$KEYCHAIN_PROFILE" "$KEYCHAIN_ENTITLEMENTS"
+python3 "$SCRIPT_DIR/prepare-keychain-signing.py" "${PROVISIONING_PROFILE:-auto}" "$KEYCHAIN_ENTITLEMENTS" --identity "$CODESIGN_IDENTITY" --embed "$KEYCHAIN_PROFILE"
 APP_VERSION="$(/usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' "$INFO_PLIST_SOURCE")"
 readonly APP_VERSION
 readonly RELEASE_BUILD="${RELEASE_BUILD:-1}"
