@@ -1,13 +1,13 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.8-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
-[![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
+[![release](https://img.shields.io/github/v/release/Sharknia/claude-session?style=flat-square&color=orange&label=release)](https://github.com/Sharknia/claude-session/releases/latest)
+[![asset downloads](https://img.shields.io/github/downloads/Sharknia/claude-session/total?style=flat-square&color=yellowgreen&label=asset%20downloads)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 정해진 시각부터 Claude Code의 5시간 사용량 창을 준비하는 macOS 메뉴바 앱입니다. 업무 시작 전에 첫 창을 열고, 실제 리셋 시각에 맞춰 후속 창을 관리합니다.
 
-> 0.1.8은 잠자기 방지 설정을 추가합니다.
+> 버전별 변경 사항은 [릴리즈 노트](https://github.com/Sharknia/claude-session/releases)에서 확인할 수 있습니다.
 
 ## 주요 기능
 

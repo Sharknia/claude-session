@@ -90,6 +90,7 @@ result=storage_probe_pass; backend=data_protection; migration=verified; rotation
 
 - 프로필 불일치: 기존 프로필의 앱·팀·인증서와 `CODESIGN_IDENTITY`를 대조한다. 인증서가 여러 개면 SHA-1 식별자로 의도한 인증서를 지정한다.
 - Keychain 실패: 원래 OSStatus와 실패 단계를 확인한다. 공증 성공이나 수동 인증 성공만으로 다른 실행 시점의 접근 성공을 단정하지 않는다.
+- 공증 프로필을 찾지 못함(`No Keychain password item found for profile`): 프로필을 다시 만들기 전에 Mac 화면이 잠겨 있지 않은지 확인한다. 잠금 중에는 이 인증 정보를 읽을 수 없고, 잠금을 풀면 같은 명령이 성공한다. 빌드는 앱과 DMG를 제출할 때 각각 인증 정보를 읽으므로 끝날 때까지 화면을 잠그지 않는다. `caffeinate -di bash scripts/build-dmg.sh`로 화면이 꺼지며 잠기는 것은 막을 수 있다.
 - 공증 실패 또는 대기: 응답의 submission ID로 `notarytool info`를 확인하고 `notarytool log`로 원인을 읽는다. 진행 중인 제출을 확인하지 않은 채 다시 제출하거나 인증 정보를 재생성하지 않는다.
 
 ```sh
@@ -126,5 +127,43 @@ xcrun notarytool log <submission-id> --keychain-profile claude-session-notary
 릴리즈: [v0.1.7](https://github.com/Sharknia/claude-session/releases/tag/v0.1.7). 근거는 공개 자산·체크섬, 로컬 `dist/app-notarization.json`, `dist/dmg-notarization.json`, `/tmp/claude-session-release-017.log`에서 확인했다.
 
 개발 프로필 설치 이력이 없는 별도 Mac/사용자 환경의 설치·Keychain 검증과 새 설치본의 실제 잠금 중 예약 성공은 아직 확인하지 않았다. 공증 결과를 이 검증의 완료로 표시하지 않는다.
+
+## 0.1.8 / 빌드 14 실제 결과
+
+| 항목 | 결과 |
+| --- | --- |
+| 공개 시각 | 2026-10-02 18:08:15 KST |
+| main 및 v0.1.8 대상 커밋 | `52c9366892024d6e79777e68e96a3eb084998b0a` |
+| PR | [dev #20](https://github.com/Sharknia/claude-session/pull/20), [main #21](https://github.com/Sharknia/claude-session/pull/21) 머지 |
+| 자동 검증 | 테스트 160개, 실패 0; release 빌드 통과; `verify-execution.py`, `verify-concurrent-storage.py` 통과 |
+| Keychain | `storage_probe_pass`; 이전·재읽기·갱신·실제 접근 속성 확인 |
+| 앱 공증 | `536aaf1a-1270-4d2b-8b6c-ffa9c55ae8a9` — Accepted |
+| DMG 공증 | `f599cff9-bec4-4d13-9b33-f48d84b9694d` — Accepted |
+| 앱·DMG 후속 검사 | stapling/validate 및 Gatekeeper accepted (`Notarized Developer ID`) |
+| DMG | `ClaudeSessionWarmer-0.1.8.dmg`, 3,445,696 bytes |
+| DMG SHA-256 | `e792e8c60b6e334ddec93a0a442063273384f5b2c507828b1bef09506fb4789f` |
+| appcast SHA-256 | `1b44161532983b3e5fb3fe1466b952bfe0704a1828bfaf1b8b8903d398c5082e` |
+| 체크섬 파일 SHA-256 | `704519c17fe7b81469650604e4d51d8e13841410e8674fdd13cbc4f7f6ab4a89` |
+| 공개 확인 | 3개 자산의 다운로드 바이트·해시 일치, latest 피드 0.1.8/14 일치, 피드·DMG 서명 통과 |
+
+릴리즈: [v0.1.8](https://github.com/Sharknia/claude-session/releases/tag/v0.1.8). 근거는 공개 자산·체크섬, 로컬 `dist/app-notarization.json`, `dist/dmg-notarization.json`, `dist/release-0.1.8.log`에서 확인했다.
+
+첫 빌드 시도는 화면이 잠긴 상태(18:00:13~18:02:33 KST)에서 실행돼 공증 프로필을 읽지 못하고 중단됐다. 산출물이 만들어지기 전이었고, 잠금 해제 뒤 같은 명령으로 다시 빌드했다.
+
+잠자기 방지([설계 명세](16_SLEEP_PREVENTION_PLAN.md) 10.3)의 실기 확인은 다음과 같다. 공개 뒤 이 Mac의 `/Applications`에 공증된 0.1.8을 설치해 실행을 확인했다.
+
+| 항목 | 결과 | 근거 |
+| --- | --- | --- |
+| `끔`: 어서션 없음 | 통과 | `pmset -g assertions`에 앱의 줄 없음 |
+| `상시` + 전원 연결 | 통과 | `PreventUserIdleSystemSleep named: "ClaudeSessionWarmer sleep prevention"` 한 줄, 로그 `sleep_prevention.acquired` |
+| 메뉴에서 `상시` 저장 → 즉시 획득 | 통과 | 로그 `acquired`, `trigger=settings_changed` |
+| 메뉴에서 `끔` 저장 → 즉시 해제 | 통과 | 로그 `released`, `trigger=settings_changed` |
+| 종료·`kill -9` 시 해제 | 통과 | 프로세스 종료 직후 어서션 줄 0 |
+| `예약 전후만`, 다음 예약이 30분보다 멂 | 통과 | 어서션·로그 없음 |
+| `상시`에서 어댑터 분리·재연결 | 미확인 | 자동 테스트(가짜 전원)로만 검증 |
+| 예약 30분 전 자동 획득(실제 선행 타이머) | 미확인 | 자동 테스트(가짜 시계)로만 검증 |
+| 업데이트 재시작 전후의 어서션 | 미확인 | 0.1.7 → 0.1.8 앱 내 업데이트 경로를 실행하지 않음 |
+
+미확인 세 항목과, 개발 프로필 설치 이력이 없는 별도 Mac/사용자 환경의 설치·Keychain 검증은 남은 검증 조건이다. 공증 결과를 이 검증의 완료로 표시하지 않는다.
 
 관련 스크립트: [프로필 확인](scripts/prepare-keychain-signing.py), [Keychain 검증](scripts/verify-warmup.sh), [배포 빌드](scripts/build-dmg.sh), [업데이트 피드](scripts/generate-appcast.sh).
