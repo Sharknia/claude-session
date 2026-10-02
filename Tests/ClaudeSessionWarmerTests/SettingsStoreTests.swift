@@ -140,7 +140,7 @@ final class SettingsStoreTests: XCTestCase {
 
         XCTAssertEqual(
             scheduleKeys,
-            ["firstWarmupMinutes", "weekdays", "excludeKoreanHolidays", "launchAtLogin"]
+            ["firstWarmupMinutes", "weekdays", "excludeKoreanHolidays", "launchAtLogin", "sleepPrevention"]
         )
         XCTAssertEqual(
             cycleKeys,
@@ -152,6 +152,85 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(persistedKeys.isDisjoint(with: [
             "token", "accessToken", "refreshToken", "oauthToken", "apiKey", "authorization"
         ]))
+    }
+
+    func testSettingsRecordWithoutSleepPreventionReadsAsOff() {
+        seedCurrentRecords()
+        defaults.set(settingsRecord(extraFields: ""), forKey: SettingsStore.settingsKey)
+
+        let store = SettingsStore(defaults: defaults)
+
+        XCTAssertNil(store.issue)
+        XCTAssertEqual(store.loadSettings().sleepPrevention, .off)
+        XCTAssertEqual(store.loadSettings().firstWarmupMinutes, 480)
+        XCTAssertEqual(store.loadSettings().weekdays, [2, 3])
+        XCTAssertTrue(store.loadSettings().launchAtLogin)
+        // 키가 없는 레코드를 "외부에서 변경됨"으로 오판하지 않는다.
+        XCTAssertTrue(store.validateCurrentRecords())
+    }
+
+    func testLegacyVersionlessSettingsReadAsOff() {
+        let legacy = #"{"firstWarmupMinutes":480,"weekdays":[2,3],"excludeKoreanHolidays":false,"launchAtLogin":true}"#
+        defaults.set(Data(legacy.utf8), forKey: "scheduleSettings")
+
+        let store = SettingsStore(defaults: defaults)
+
+        XCTAssertNil(store.issue)
+        XCTAssertEqual(store.loadSettings().sleepPrevention, .off)
+        XCTAssertEqual(store.loadSettings().firstWarmupMinutes, 480)
+        // 이전이 끝난 뒤 다시 열어도 같은 값이다.
+        let restarted = SettingsStore(defaults: defaults)
+        XCTAssertNil(restarted.issue)
+        XCTAssertEqual(restarted.loadSettings().sleepPrevention, .off)
+    }
+
+    func testSleepPreventionRoundTrip() {
+        for mode in SleepPreventionMode.allCases {
+            let roundTripDefaults = MemoryDefaults()
+            let store = SettingsStore(defaults: roundTripDefaults)
+
+            XCTAssertTrue(store.saveSettings(ScheduleSettings(sleepPrevention: mode)), "\(mode)")
+
+            let reopened = SettingsStore(defaults: roundTripDefaults)
+            XCTAssertNil(reopened.issue, "\(mode)")
+            XCTAssertEqual(reopened.loadSettings().sleepPrevention, mode)
+        }
+    }
+
+    func testUnknownSleepPreventionValueIsReportedAsCorruptNotSilentlyOff() {
+        seedCurrentRecords()
+        defaults.set(settingsRecord(extraFields: #","sleepPrevention":"someFutureMode""#),
+                     forKey: SettingsStore.settingsKey)
+
+        let store = SettingsStore(defaults: defaults)
+
+        XCTAssertEqual(store.issue?.area, .settings)
+        XCTAssertEqual(store.issue?.kind, .corrupt)
+        // 손상 상태의 반환값은 초안 기본값이다. 미지 값을 조용히 끔으로 읽은 것이 아니다.
+        XCTAssertEqual(store.loadSettings().sleepPrevention, .off)
+        XCTAssertEqual(store.loadSettings().firstWarmupMinutes, 6 * 60)
+    }
+
+    func testNullSleepPreventionReadsAsOffAndWrongTypeIsCorrupt() {
+        seedCurrentRecords()
+        defaults.set(settingsRecord(extraFields: #","sleepPrevention":null"#), forKey: SettingsStore.settingsKey)
+        let nullStore = SettingsStore(defaults: defaults)
+        XCTAssertNil(nullStore.issue)
+        XCTAssertEqual(nullStore.loadSettings().sleepPrevention, .off)
+
+        defaults.set(settingsRecord(extraFields: #","sleepPrevention":1"#), forKey: SettingsStore.settingsKey)
+        XCTAssertEqual(SettingsStore(defaults: defaults).issue?.kind, .corrupt)
+    }
+
+    /// 실행 기록과 이전 기록까지 갖춘 정상 상태를 만든다. 이후 예약 설정 레코드만 바꿔 쓴다.
+    private func seedCurrentRecords() {
+        _ = SettingsStore(defaults: defaults)
+    }
+
+    /// 헤더 1·1과 0.1.7의 네 필드를 가진 레코드. `extraFields`는 `,"키":값` 형태로 덧붙인다.
+    private func settingsRecord(extraFields: String) -> Data {
+        let base = #""firstWarmupMinutes":480,"weekdays":[2,3],"excludeKoreanHolidays":false,"launchAtLogin":true"#
+        return Data(#"{"schemaVersion":1,"minimumReaderVersion":1,"value":{\#(base)\#(extraFields)}}"#.utf8)
     }
 
     private func jsonObjectKeys<Value: Encodable>(for value: Value) throws -> [String] {
