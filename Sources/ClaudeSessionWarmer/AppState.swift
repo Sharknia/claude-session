@@ -16,13 +16,20 @@ enum ClaudeConnectionState: Equatable {
 final class AppState: ObservableObject {
     static let quotaCacheLifetime: TimeInterval = 5 * 60
 
-    @Published private(set) var settings: ScheduleSettings
+    // 아래 세 값(settings·nextEvent·isWorking)이 잠자기 방지 판정의 입력이다. 바뀔 때마다 재평가한다.
+    @Published private(set) var settings: ScheduleSettings {
+        didSet { reevaluateSleepPrevention(trigger: "settings_changed") }
+    }
     @Published private(set) var cycle: DailyCycle
-    @Published private(set) var nextEvent: ScheduledEvent?
+    @Published private(set) var nextEvent: ScheduledEvent? {
+        didSet { reevaluateSleepPrevention(trigger: "schedule_changed") }
+    }
     @Published private(set) var currentQuota: QuotaWindow?
     @Published private(set) var status: WarmupStatus
     @Published private(set) var statusMessage: String
-    @Published private(set) var isWorking = false
+    @Published private(set) var isWorking = false {
+        didSet { reevaluateSleepPrevention(trigger: "working_changed") }
+    }
     @Published private(set) var isManualWarmupRunning = false
     @Published private(set) var isSilentRefreshRunning = false
     @Published private(set) var connectionState: ClaudeConnectionState = .disconnected
@@ -198,14 +205,17 @@ final class AppState: ObservableObject {
         firstWarmupDate: Date,
         weekdays: Set<Int>,
         excludeKoreanHolidays: Bool,
-        launchAtLogin: Bool? = nil
+        launchAtLogin: Bool? = nil,
+        sleepPrevention: SleepPreventionMode? = nil
     ) -> Bool {
         guard executionCheck() == nil, firstWarmupDate.timeIntervalSince1970.isFinite,
               !weekdays.isEmpty, weekdays.allSatisfy({ (1...7).contains($0) }) else { return false }
         let components = Calendar.autoupdatingCurrent.dateComponents([.hour, .minute], from: firstWarmupDate)
+        // sleepPrevention이 nil이면 "바꾸지 않음"이다. 현재 값을 그대로 넘긴다.
         let candidate = ScheduleSettings(firstWarmupMinutes: (components.hour ?? 0) * 60 + (components.minute ?? 0),
                                          weekdays: weekdays, excludeKoreanHolidays: excludeKoreanHolidays,
-                                         launchAtLogin: settings.launchAtLogin)
+                                         launchAtLogin: settings.launchAtLogin,
+                                         sleepPrevention: sleepPrevention ?? settings.sleepPrevention)
         guard (try? candidate.validate()) != nil else { return false }
         if store.canRepairSettings {
             guard !hasActiveOperation else { return false }
