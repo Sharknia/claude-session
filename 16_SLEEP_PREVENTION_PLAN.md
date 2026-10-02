@@ -2,7 +2,7 @@
 
 작성일: 2026-10-02 (Asia/Seoul)
 
-상태: 설계 확정. 구현 전. 이 문서는 구현 계획을 바로 세울 수 있도록 결정 사항만 적는다. 선택지는 4장에서 비교하고 하나로 확정했으며 미정 항목은 없다.
+상태: 구현 완료(브랜치 Sharknia/anti-sleep). 이 문서는 구현 계획을 바로 세울 수 있도록 결정 사항만 적는다. 선택지는 4장에서 비교하고 하나로 확정했으며 미정 항목은 없다.
 
 기준 코드: `7730880d166334676a547a24c52feb606a4d79bb` (main, 0.1.7 / 빌드 13). 적용 배포는 다음 버전(0.1.8 / 빌드 14)이며 `packaging/Info.plist`의 버전·빌드 갱신은 배포 단계에서 수행한다.
 
@@ -141,7 +141,7 @@ Mac이 05:30 이전에 이미 잠들어 있으면 선행 타이머는 깨어난 
 | `/Applications` 밖에서 실행 | `ApplicationRuntime.init` 56~57행이 차단 메시지를 만들고 96~98행이 `state = nil` | `AppState`가 없으므로 어서션 자체가 없다. |
 | 중복 실행(두 번째 프로세스) | `ApplicationRuntime.init` 64~72행 `exit(0)` | `AppState` 생성 전에 종료한다. 어서션 없음. |
 | 정상 종료·크래시·`kill -9` | IOKit 어서션은 프로세스 단위로 powerd가 관리한다 | 프로세스가 사라지면 OS가 해제한다. 앱 코드의 추가 처리 없음. `deinit`의 해제는 테스트 정리를 위한 것이다. |
-| Sparkle 업데이트 재시작 | `AppUpdater`는 `hasActiveOperation`이 꺼진 뒤에만 설치·재시작한다 | 구 프로세스 종료로 해제, 새 프로세스의 `startup` 재평가로 재획득. 재시작 사이 수 초 동안 공백이 생기며 수용한다. |
+| Sparkle 업데이트 재시작 | `AppUpdater`는 `hasActiveOperation`이 꺼진 뒤에만 설치·재시작한다 | 구 프로세스 종료로 해제, 새 프로세스가 시작하면서 재획득(정상 시작에서는 일정 계산의 `nextEvent` 대입이 먼저 쥐므로 로그의 트리거는 `schedule_changed`일 수 있다). 재시작 사이 수 초 동안 공백이 생기며 수용한다. |
 | 워밍 중 설정 저장 | `applySettings` 159행 `scheduleRevision += 1` | 기존 동작과 같다. 진행 중 `checkSession`은 조회를 한 번 다시 하거나 재시도로 넘어간다. 잠자기 방지 값만 바꿔도 같은 경로를 타며, 특수 처리를 추가하지 않는다. |
 | Dark Wake 중 | IOKit 헤더: "This assertion has no effect if the system is in Dark Wake." | 어서션은 전체 깨어남(full wake) 상태만 유지한다. Dark Wake에서 지연 콜백이 실행되는 기존 동작은 바뀌지 않는다. |
 
