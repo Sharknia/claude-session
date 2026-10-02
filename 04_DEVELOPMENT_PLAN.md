@@ -39,6 +39,7 @@ ClaudeSessionWarmer/
 ├── ScheduleEngine.swift
 ├── ClaudeService.swift
 ├── MenuContent.swift
+├── SleepPrevention.swift
 ├── Resources/kr-holidays.json
 └── Tests/
 ```
