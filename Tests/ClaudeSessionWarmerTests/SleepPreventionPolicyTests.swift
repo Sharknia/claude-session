@@ -100,3 +100,22 @@ final class SleepPreventionPolicyTests: XCTestCase {
         XCTAssertNil(SleepPreventionPolicy.nextEvaluationDate(input(.off, next: far)))
     }
 }
+
+/// 실제 IOKit을 호출하지 않는 경계 테스트. 전원 종류 분류와 어서션 이름만 고정한다.
+final class PowerSourceTests: XCTestCase {
+    func testOnlyACPowerCountsAsAC() {
+        XCTAssertTrue(PowerSource.isACPower(providingPowerSourceType: "AC Power"))
+        XCTAssertFalse(PowerSource.isACPower(providingPowerSourceType: "Battery Power"))
+        XCTAssertFalse(PowerSource.isACPower(providingPowerSourceType: "UPS Power"))
+        // 조회 실패는 보수적으로 배터리와 같이 취급한다.
+        XCTAssertFalse(PowerSource.isACPower(providingPowerSourceType: nil))
+        XCTAssertFalse(PowerSource.isACPower(providingPowerSourceType: ""))
+    }
+
+    @MainActor
+    func testAssertionNameIsOneShortASCIIConstant() {
+        XCTAssertEqual(IdleSleepAssertion.name, "ClaudeSessionWarmer sleep prevention")
+        XCTAssertTrue(IdleSleepAssertion.name.allSatisfy(\.isASCII))
+        XCTAssertLessThanOrEqual(IdleSleepAssertion.name.count, 128)
+    }
+}
