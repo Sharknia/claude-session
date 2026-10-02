@@ -140,14 +140,21 @@ struct SleepPreventionFixture {
 
     /// 이 파일의 모든 테스트는 이 함수로만 AppState를 만든다.
     /// 조회·로그인·워밍·어서션·전원을 전부 가짜로 주입하고, 가짜 시계이므로 스케줄러 타이머는 켜지 않는다.
-    func makeState(store storeOverride: SettingsStore? = nil) -> AppState {
+    /// `startScheduler: true`는 차단 상태 시작 경로 검증 전용이며, 실제 시계(`Date()`)와만 쓴다.
+    func makeState(store storeOverride: SettingsStore? = nil, startScheduler: Bool = false) -> AppState {
         let clock = clock, backend = backend, power = power, block = block
+        let stateClock: @Sendable () -> Date
+        if startScheduler {
+            stateClock = { Date() }
+        } else {
+            stateClock = { clock.now() }
+        }
         return AppState(
             store: storeOverride ?? store,
             engine: engine,
-            startScheduler: false,
+            startScheduler: startScheduler,
             executionCheck: { block.reason },
-            clock: { clock.now() },
+            clock: stateClock,
             inspectClaude: { try await backend.inspect($0) },
             loginClaude: { await backend.login() },
             warmClaude: { _, _ in await backend.warm() },
@@ -236,6 +243,18 @@ final class SleepPreventionTests: XCTestCase {
         f.assertion.nextAcquireResult = kIOReturnSuccess
         state.reevaluateSleepPrevention(trigger: "power_source_changed")
         XCTAssertEqual(f.assertion.transitions, ["acquire_failed", "acquire"])
+        XCTAssertTrue(f.assertion.isHeld)
+    }
+
+    func testBlockedStartupStillReevaluatesOnce() {
+        let f = SleepPreventionFixture(mode: .always, onAC: true)
+        // 차단 사유는 생성 전에 정해 두어야 init의 조기 return 경로를 탄다.
+        f.block.reason = "구버전 실행 중"
+        let state = f.makeState(startScheduler: true)
+
+        XCTAssertNotNil(state.operationBlockReason)
+        XCTAssertNil(state.nextEvent)
+        XCTAssertEqual(f.assertion.transitions, ["acquire"])
         XCTAssertTrue(f.assertion.isHeld)
     }
 
