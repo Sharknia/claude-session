@@ -18,11 +18,19 @@ enum MenuDateFormatting {
 
 /// 잠자기 방지 설정의 메뉴 문구. 화면과 테스트가 같은 문자열을 쓴다.
 enum MenuSleepPreventionText {
+    /// 닫힌 선택 상자에 보이는 짧은 이름. 행을 작게 유지한다.
     static func title(for mode: SleepPreventionMode) -> String {
         switch mode {
         case .off: return "끔"
         case .aroundSchedule: return "예약 전후만"
-        // 상시는 전원 연결 중에만 계속 유지되므로, 설명 없이도 조건이 보이게 이름에 적는다.
+        case .always: return "상시"
+        }
+    }
+
+    /// 펼친 목록에 보이는 이름. 상시는 전원 연결 중에만 계속 유지되므로 고르는 순간에 조건이 보이게 적는다.
+    static func menuItemTitle(for mode: SleepPreventionMode) -> String {
+        switch mode {
+        case .off, .aroundSchedule: return title(for: mode)
         case .always: return "상시 (전원 연결 시)"
         }
     }
@@ -251,23 +259,31 @@ struct MenuContent: View {
                 Text("잠자기 방지")
                     .frame(width: 104, alignment: .leading)
                 Spacer()
-                Picker(
-                    "잠자기 방지",
-                    selection: Binding(
-                        get: { draftSleepPrevention },
-                        set: {
-                            draftSleepPrevention = $0
-                            didSave = false
+                // 닫힌 상태는 짧은 이름만, 펼친 목록은 조건까지 보이는 이름을 쓴다.
+                Menu {
+                    Picker(
+                        "잠자기 방지",
+                        selection: Binding(
+                            get: { draftSleepPrevention },
+                            set: {
+                                draftSleepPrevention = $0
+                                didSave = false
+                            }
+                        )
+                    ) {
+                        ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
+                            Text(MenuSleepPreventionText.menuItemTitle(for: mode)).tag(mode)
                         }
-                    )
-                ) {
-                    ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
-                        Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
                     }
+                    .pickerStyle(.inline)
+                    .labelsHidden()
+                } label: {
+                    Text(MenuSleepPreventionText.title(for: draftSleepPrevention))
                 }
-                .pickerStyle(.menu)
-                .labelsHidden()
+                .menuStyle(.button)
+                .controlSize(.small)
                 .fixedSize()
+                .accessibilityLabel("잠자기 방지")
                 .help(MenuSleepPreventionText.helpText(for: draftSleepPrevention))
             }
 
