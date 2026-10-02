@@ -250,7 +250,7 @@ struct MenuContent: View {
                         .frame(width: 104, alignment: .leading)
                     Spacer()
                     Picker(
-                        "",
+                        "잠자기 방지",
                         selection: Binding(
                             get: { draftSleepPrevention },
                             set: {

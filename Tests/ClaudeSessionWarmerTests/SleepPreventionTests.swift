@@ -246,7 +246,9 @@ final class SleepPreventionTests: XCTestCase {
         XCTAssertTrue(f.assertion.isHeld)
     }
 
-    func testBlockedStartupStillReevaluatesOnce() {
+    /// 차단 상태로 시작해도 `상시` + 전원 연결은 정확히 한 번 쥔다.
+    /// `startup` 재평가와 `nextEvent` 대입 재평가가 겹쳐도 획득은 한 번이다.
+    func testBlockedStartupAcquiresExactlyOnceForAlwaysOnAC() {
         let f = SleepPreventionFixture(mode: .always, onAC: true)
         // 차단 사유는 생성 전에 정해 두어야 init의 조기 return 경로를 탄다.
         f.block.reason = "구버전 실행 중"

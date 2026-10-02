@@ -140,11 +140,11 @@ final class AppState: ObservableObject {
             mode: settings.sleepPrevention, now: clock(), nextEventDate: nextEvent?.date,
             isWorking: isWorking, isOnACPower: isOnACPower())
         let shouldHold = SleepPreventionPolicy.shouldHold(input)
-        var metadata = ["trigger": trigger, "mode": input.mode.rawValue,
-                        "next_event_at": diagnosticDate(input.nextEventDate),
-                        "is_working": input.isWorking ? "true" : "false",
-                        "power_source": input.isOnACPower ? "ac" : "battery_or_unknown"]
         if shouldHold != sleepAssertion.isHeld {
+            var metadata = ["trigger": trigger, "mode": input.mode.rawValue,
+                            "next_event_at": diagnosticDate(input.nextEventDate),
+                            "is_working": input.isWorking ? "true" : "false",
+                            "power_source": input.isOnACPower ? "ac" : "battery_or_unknown"]
             if shouldHold {
                 let result = sleepAssertion.acquire()
                 metadata["io_return"] = Self.hexadecimal(result)
