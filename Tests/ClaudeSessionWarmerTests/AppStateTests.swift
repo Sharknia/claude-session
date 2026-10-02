@@ -75,12 +75,12 @@ final class AppStateTests: XCTestCase {
 
     func testSleepPreventionMenuTextMatchesSpecCopy() {
         XCTAssertEqual(SleepPreventionMode.allCases.map { MenuSleepPreventionText.title(for: $0) },
-                       ["끔", "예약 전후만", "상시"])
-        XCTAssertEqual(MenuSleepPreventionText.caption(for: .off),
+                       ["끔", "예약 전후만", "상시 (전원 연결 시)"])
+        XCTAssertEqual(MenuSleepPreventionText.helpText(for: .off),
                        "Mac의 자동 잠자기를 막지 않습니다.")
-        XCTAssertEqual(MenuSleepPreventionText.caption(for: .aroundSchedule),
+        XCTAssertEqual(MenuSleepPreventionText.helpText(for: .aroundSchedule),
                        "다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다. 배터리에서도 적용됩니다.")
-        XCTAssertEqual(MenuSleepPreventionText.caption(for: .always),
+        XCTAssertEqual(MenuSleepPreventionText.helpText(for: .always),
                        "전원 어댑터 연결 중에는 계속, 배터리에서는 다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다.")
     }
 

@@ -371,41 +371,43 @@ private func armSleepLeadTimer(_ date: Date?) {
 
 `applySettings`에 `sleepPrevention: SleepPreventionMode? = nil` 인자를 추가하고 후보 생성(142~144행)에서 `sleepPrevention: sleepPrevention ?? settings.sleepPrevention`을 넘긴다. `nil`은 "바꾸지 않음"이며 기존 호출자(`ExecutionOwnershipTests` 41행, `StorageReliabilityTests` 193행, `SchedulerRecoveryTests` 239·275행, `AppStateTests` 87·110행)는 그대로 컴파일된다.
 
-### 5.4 `MenuContent.swift` — Picker
+### 5.4 `MenuContent.swift` — 선택 상자
 
 `scheduleSettings`의 "Mac 로그인 시 앱 실행" 토글(210~220행) 바로 아래, 저장 버튼 행(222행) 위에 둔다. 초안·저장 흐름은 기존 토글과 같다.
 
 ```swift
 @State private var draftSleepPrevention: SleepPreventionMode   // init에서 state.settings.sleepPrevention
 
-VStack(alignment: .leading, spacing: 4) {
-    HStack {
-        Text("잠자기 방지").frame(width: 104, alignment: .leading)
-        Spacer()
-        Picker("", selection: Binding(
-            get: { draftSleepPrevention },
-            set: { draftSleepPrevention = $0; didSave = false }
-        )) {
-            Text("끔").tag(SleepPreventionMode.off)
-            Text("예약 전후만").tag(SleepPreventionMode.aroundSchedule)
-            Text("상시").tag(SleepPreventionMode.always)
+HStack {
+    Text("잠자기 방지").frame(width: 104, alignment: .leading)
+    Spacer()
+    Picker("잠자기 방지", selection: Binding(
+        get: { draftSleepPrevention },
+        set: { draftSleepPrevention = $0; didSave = false }
+    )) {
+        ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
+            Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
         }
-        .pickerStyle(.segmented)
-        .labelsHidden()
     }
-    Text(sleepPreventionCaption).font(.caption).foregroundStyle(.secondary)
+    .pickerStyle(.menu)
+    .labelsHidden()
+    .fixedSize()
+    .help(MenuSleepPreventionText.helpText(for: draftSleepPrevention))
 }
 ```
 
-설명문(`sleepPreventionCaption`)은 초안 값에 따라 고정 문구 하나를 보여 준다.
+컨트롤은 선택 상자(pop-up) 하나다. 처음에는 세그먼트 컨트롤과 항상 보이는 설명문으로 구현했으나, 실기 확인에서 `상시`의 설명문이 패널 폭 372에서 말줄임표로 잘렸다. 좁은 패널에 긴 문장을 상시 노출할 이유가 없어 다음과 같이 바꿨다.
 
-| 값 | 문구 |
-| --- | --- |
-| `끔` | "Mac의 자동 잠자기를 막지 않습니다." |
-| `예약 전후만` | "다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다. 배터리에서도 적용됩니다." |
-| `상시` | "전원 어댑터 연결 중에는 계속, 배터리에서는 다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다." |
+- 선택지 이름만으로 조건이 드러나게 한다. `상시`는 화면에 "상시 (전원 연결 시)"로 표시한다. 문서와 저장 값에서 가리키는 이름은 그대로 `상시`(`always`)다.
+- 설명은 항상 노출하지 않고 선택 상자의 도움말(마우스를 올리면 보임)로 둔다.
 
-`hasDraftChanges`(311~316행)에 `|| draftSleepPrevention != state.settings.sleepPrevention`을 추가하고, `saveDraft`(351~365행)는 `applySettings(…, sleepPrevention: draftSleepPrevention)`을 호출한 뒤 초안을 저장값으로 되돌린다. 패널 폭 372에서 라벨 104 + 세그먼트 3개는 기존 "첫 워밍" 행과 같은 배치다.
+| 값 | 화면 표시 | 도움말 |
+| --- | --- | --- |
+| `끔` | "끔" | "Mac의 자동 잠자기를 막지 않습니다." |
+| `예약 전후만` | "예약 전후만" | "다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다. 배터리에서도 적용됩니다." |
+| `상시` | "상시 (전원 연결 시)" | "전원 어댑터 연결 중에는 계속, 배터리에서는 다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다." |
+
+`hasDraftChanges`(311~316행)에 `|| draftSleepPrevention != state.settings.sleepPrevention`을 추가하고, `saveDraft`(351~365행)는 `applySettings(…, sleepPrevention: draftSleepPrevention)`을 호출한 뒤 초안을 저장값으로 되돌린다. 라벨 104 + 오른쪽 정렬 컨트롤은 기존 "첫 워밍" 행과 같은 배치다. 선택 상자는 가장 긴 선택지 폭으로 고정되므로 값을 바꿔도 행의 크기가 변하지 않는다.
 
 ## 6. 변경 파일 목록
 
@@ -415,7 +417,7 @@ VStack(alignment: .leading, spacing: 4) {
 | `Sources/ClaudeSessionWarmer/Models.swift` | `SleepPreventionMode` 추가. `ScheduleSettings`에 필드·생성자 기본값·`init(from:)` | 약 25행 |
 | `Sources/ClaudeSessionWarmer/AppState.swift` | 저장 프로퍼티 4개, 생성자 인자 2개, `didSet` 3개(`settings`·`nextEvent`·`isWorking`), `reevaluateSleepPrevention`·`armSleepLeadTimer`, `applySettings` 인자, `init`의 `defer` 호출과 전원 관찰자 생성 | 약 60행 |
 | `scripts/verify-scheduler.sh` | 7~20행의 명시 소스 목록에 `Sources/ClaudeSessionWarmer/SleepPrevention.swift` 한 줄 추가. 빠지면 `cannot find type 'IdleSleepAssertionHolding'`로 실패하고, 이 빌드를 쓰는 `scripts/verify-concurrent-storage.py`(12행 `--build-only`)도 실패한다. IOKit은 `import`로 자동 링크되므로 링크 플래그 추가는 없다. `scripts/preview-recovery-menu.sh`(39행 glob)는 자동 포함, `scripts/verify-warmup.sh`는 `Models.swift`만 포함하며 `SleepPreventionMode`가 같은 파일에 있어 영향 없음. | 1행 |
-| `Sources/ClaudeSessionWarmer/MenuContent.swift` | 초안 상태, Picker 행과 설명문, `hasDraftChanges`, `saveDraft` | 약 35행 |
+| `Sources/ClaudeSessionWarmer/MenuContent.swift` | 초안 상태, 선택 상자 행과 도움말, `hasDraftChanges`, `saveDraft` | 약 35행 |
 | `Tests/ClaudeSessionWarmerTests/SleepPreventionPolicyTests.swift` | 새 파일. 판정 함수 표 기반 테스트 | 약 80행 |
 | `Tests/ClaudeSessionWarmerTests/SleepPreventionTests.swift` | 새 파일. 가짜 어서션·가짜 전원으로 `AppState` 전이 테스트와 불변식 테스트 | 약 200행 |
 | `Tests/ClaudeSessionWarmerTests/SettingsStoreTests.swift` | 키 집합 기대값에 `sleepPrevention` 추가, 키 없는 레코드·왕복·미지 값 테스트 | 약 40행 |
@@ -634,7 +636,7 @@ python3 scripts/verify-concurrent-storage.py
 - [ ] `IdleSleepAssertion`·`PowerSource`·`PowerSourceObserver` 구현, entitlements·Info.plist 키 변경 없음 확인
 - [ ] `AppState`의 `didSet` 세 개·선행 타이머·전원 관찰자·`startup` 재평가(`defer`) 배선, 불변식 테스트 통과
 - [ ] 10.2 테스트 안전 규칙 준수(세 백엔드 가짜 전부 주입, 공용 `makeState()`, 고정 순서, 가짜 시계에서 `startScheduler: false`)
-- [ ] 메뉴 Picker와 설명문, 초안·저장 흐름
+- [ ] 메뉴 선택 상자와 도움말, 초안·저장 흐름
 - [ ] 진단 로그 다섯 이벤트
 - [ ] 기존 테스트 120개 포함 `swift test`, `swift build -c release`, `scripts/verify-scheduler.sh --build-only`·실행·동시 저장 검증 스크립트 통과
 - [ ] 10.3 실기 확인 여섯 항목 기록

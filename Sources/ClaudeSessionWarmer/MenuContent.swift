@@ -22,11 +22,13 @@ enum MenuSleepPreventionText {
         switch mode {
         case .off: return "끔"
         case .aroundSchedule: return "예약 전후만"
-        case .always: return "상시"
+        // 상시는 전원 연결 중에만 계속 유지되므로, 설명 없이도 조건이 보이게 이름에 적는다.
+        case .always: return "상시 (전원 연결 시)"
         }
     }
 
-    static func caption(for mode: SleepPreventionMode) -> String {
+    /// 선택 상자에 마우스를 올리면 보이는 도움말. 화면에 항상 노출하지 않는다.
+    static func helpText(for mode: SleepPreventionMode) -> String {
         switch mode {
         case .off:
             return "Mac의 자동 잠자기를 막지 않습니다."
@@ -244,31 +246,29 @@ struct MenuContent: View {
             )
 
             // 잠자기 방지: 다른 항목과 같이 초안만 바꾸고, 저장을 눌러야 적용된다.
-            VStack(alignment: .leading, spacing: 4) {
-                HStack {
-                    Text("잠자기 방지")
-                        .frame(width: 104, alignment: .leading)
-                    Spacer()
-                    Picker(
-                        "잠자기 방지",
-                        selection: Binding(
-                            get: { draftSleepPrevention },
-                            set: {
-                                draftSleepPrevention = $0
-                                didSave = false
-                            }
-                        )
-                    ) {
-                        ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
-                            Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
+            // 좁은 패널에서 글자가 눌리거나 잘리지 않도록 선택 상자 하나로 두고, 설명은 도움말로 뺀다.
+            HStack {
+                Text("잠자기 방지")
+                    .frame(width: 104, alignment: .leading)
+                Spacer()
+                Picker(
+                    "잠자기 방지",
+                    selection: Binding(
+                        get: { draftSleepPrevention },
+                        set: {
+                            draftSleepPrevention = $0
+                            didSave = false
                         }
+                    )
+                ) {
+                    ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
+                        Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
                     }
-                    .pickerStyle(.segmented)
-                    .labelsHidden()
                 }
-                Text(sleepPreventionCaption)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                .pickerStyle(.menu)
+                .labelsHidden()
+                .fixedSize()
+                .help(MenuSleepPreventionText.helpText(for: draftSleepPrevention))
             }
 
             HStack {
@@ -366,10 +366,6 @@ struct MenuContent: View {
             || draftExcludeHolidays != state.settings.excludeKoreanHolidays
             || draftLaunchAtLogin != state.settings.launchAtLogin
             || draftSleepPrevention != state.settings.sleepPrevention
-    }
-
-    private var sleepPreventionCaption: String {
-        MenuSleepPreventionText.caption(for: draftSleepPrevention)
     }
 
     private var draftMinutes: Int {
