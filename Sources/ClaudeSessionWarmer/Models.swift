@@ -1,5 +1,16 @@
 import Foundation
 
+/// 유휴 시스템 잠자기 방지 설정값.
+///
+/// 저장 규칙: 디코딩은 엄격하다. 모르는 값을 만나면 예약 설정을 "손상"으로 처리해 실행을 멈춘다.
+/// 따라서 네 번째 값을 추가하는 버전은 `StoredRecord.minimumReaderVersion`을 2로 올려,
+/// 이 버전이 "더 새로운 앱에서 저장한 데이터"로 안내하게 해야 한다.
+enum SleepPreventionMode: String, Codable, CaseIterable, Sendable {
+    case off            // 끔
+    case aroundSchedule // 예약 전후만
+    case always         // 상시
+}
+
 struct ScheduleSettings: Codable, Equatable, Sendable {
     /// Minutes after midnight in the user's current time zone.
     var firstWarmupMinutes: Int
@@ -8,18 +19,33 @@ struct ScheduleSettings: Codable, Equatable, Sendable {
     var weekdays: Set<Int>
     var excludeKoreanHolidays: Bool
     var launchAtLogin: Bool
+    /// 유휴 잠자기 방지 모드. 저장된 레코드에 키가 없으면 `.off`다.
+    var sleepPrevention: SleepPreventionMode
 
     init(
         firstWarmupMinutes: Int = 6 * 60,
         weekdays: Set<Int> = [2, 3, 4, 5, 6],
         excludeKoreanHolidays: Bool = true,
-        launchAtLogin: Bool = false
+        launchAtLogin: Bool = false,
+        sleepPrevention: SleepPreventionMode = .off
     ) {
         self.firstWarmupMinutes = firstWarmupMinutes
         self.weekdays = weekdays
         self.excludeKoreanHolidays = excludeKoreanHolidays
         self.launchAtLogin = launchAtLogin
+        self.sleepPrevention = sleepPrevention
     }
+
+    init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        firstWarmupMinutes = try container.decode(Int.self, forKey: .firstWarmupMinutes)
+        weekdays = try container.decode(Set<Int>.self, forKey: .weekdays)
+        excludeKoreanHolidays = try container.decode(Bool.self, forKey: .excludeKoreanHolidays)
+        launchAtLogin = try container.decode(Bool.self, forKey: .launchAtLogin)
+        // 0.1.7 이하가 쓴 레코드와 버전 없는 구형 레코드에는 이 키가 없다. 없으면 끔.
+        sleepPrevention = try container.decodeIfPresent(SleepPreventionMode.self, forKey: .sleepPrevention) ?? .off
+    }
+    // encode(to:)는 합성을 유지한다. `.off`도 항상 키로 기록한다.
 }
 
 enum WarmupStatus: String, Codable, Equatable, Sendable {

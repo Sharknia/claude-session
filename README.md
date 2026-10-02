@@ -1,13 +1,13 @@
 # Claude Session Warmer
 
-[![release](https://img.shields.io/badge/release-v0.1.7-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
+[![release](https://img.shields.io/badge/release-v0.1.8-orange?style=flat-square)](https://github.com/Sharknia/claude-session/releases/latest)
 [![asset downloads](https://img.shields.io/badge/asset%20downloads-1-yellowgreen?style=flat-square)](https://github.com/Sharknia/claude-session/releases)
 ![languages](https://img.shields.io/badge/languages-한국어-green?style=flat-square)
 [![license](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 정해진 시각부터 Claude Code의 5시간 사용량 창을 준비하는 macOS 메뉴바 앱입니다. 업무 시작 전에 첫 창을 열고, 실제 리셋 시각에 맞춰 후속 창을 관리합니다.
 
-> 0.1.7은 중복 실행 방지, 실행 기록의 영속 저장, 손상된 설정의 복구를 보강합니다. 일시적인 네트워크·인증 장애 뒤에도 당일 예약을 재확인합니다.
+> 0.1.8은 잠자기 방지 설정을 추가합니다.
 
 ## 주요 기능
 
@@ -18,6 +18,7 @@
 - 실제 리셋 시각을 기준으로 하루 최대 3개 창 관리
 - 현재 사용량, 실행 결과, 다음 예약 확인
 - 수동 워밍 및 macOS 로그인 시 자동 실행
+- 예약 전후 또는 전원 연결 중 Mac의 자동 잠자기 방지(선택)
 - 앱 전용 Keychain에 인증 정보를 저장하고 자동 갱신
 - 앱 안에서 업데이트 확인 및 설치·재시작
 
@@ -42,7 +43,7 @@
 ## 사용법
 
 1. 메뉴바에서 앱을 열고 **Claude 로그인**을 선택해 브라우저에서 계정을 연결합니다.
-2. 첫 워밍 시각, 실행 요일, 공휴일 제외 여부를 설정합니다.
+2. 첫 워밍 시각, 실행 요일, 공휴일 제외 여부, 잠자기 방지를 설정합니다.
 3. 필요하면 **macOS 로그인 시 실행**을 켜고 **저장**합니다.
 4. 앱을 실행 상태로 두면 예약 시각에 사용량 창을 확인하고, 필요한 경우에만 워밍합니다.
 
@@ -52,7 +53,10 @@
 
 ## 사용 시 참고
 
-- 화면 잠금이나 디스플레이 꺼짐과 시스템 잠자기는 다릅니다. 예약 실행을 위해 Mac이 깨어 있고 인터넷에 연결돼 있어야 합니다.
+- 화면 잠금이나 디스플레이 꺼짐과 시스템 잠자기는 다릅니다. 예약 실행을 위해 Mac이 깨어 있고 인터넷에 연결돼 있어야 합니다. `잠자기 방지`를 `예약 전후만`으로 두면 다음 워밍 30분 전부터 확인이 끝날 때까지, `상시`로 두면 전원 어댑터 연결 중에는 계속, 배터리에서는 예약 전후 구간에만 Mac이 유휴 상태로 잠들지 않습니다. 디스플레이는 그대로 꺼지고 화면도 잠깁니다.
+- `상시`는 배터리로 바뀌면 예약 전후 구간 밖에서 해제되고 다시 연결되면 계속 유지됩니다. `예약 전후만`은 배터리에서도 적용되며 배터리 잔량을 확인하지 않습니다. 어느 설정도 저전력·수동 잠자기 등 유휴 외 원인의 잠자기를 막지 않습니다. 현재 상태는 터미널에서 `pmset -g assertions`로 확인할 수 있습니다.
+- 워밍이 실패해 재시도가 이어지는 날에는 재시도가 끝날 때까지 잠자기를 막습니다. 수동 워밍과 Claude 로그인이 진행되는 동안에도 막습니다. 배터리가 없는 데스크톱 Mac에서 `상시`는 앱이 실행되는 동안 항상 유지됩니다.
+- 잠든 Mac을 예약 시각에 깨우는 것은 앱이 하지 않습니다. 원하면 터미널에서 `sudo pmset repeat wakeorpoweron MTWRF 05:55:00`처럼 macOS 예약 깨우기를 직접 걸 수 있습니다(첫 워밍 06:00의 5분 전 예시).
 - 예약 전에 잠들었다가 예정 시각 전에 깨어나면 원래 예약 시각을 유지합니다. 잠들었던 시간만큼 예약이 뒤로 밀리지 않도록 복귀 시 일정을 다시 계산합니다.
 - 잠자기나 앱 종료로 늦어진 당일 예약은 복귀·앱 시작·지연 콜백에서 현재 세션을 확인한 뒤 처리합니다. 전날 예약을 몰아서 실행하지 않으며 Mac을 강제로 깨우지는 않습니다.
 - 일시 실패는 30초 간격으로 최대 3회 추가 재시도합니다. 인증 정보 접근이 일시적으로 거부되면 이후에도 당일 예약을 유지해 5분 간격으로 확인하고, 화면 잠금 해제 시 바로 재시도합니다. 그 밖의 지속적인 실패는 원인을 표시합니다.
@@ -71,6 +75,7 @@
 - 더 새로운 저장 형식은 덮어쓰지 않습니다. 호환되는 앱으로 업데이트해야 합니다. 저장 장치의 일시 오류는 **다시 읽기**로 재확인할 수 있습니다.
 - 예약 설정은 별도 버전 키에, 실행 기록은 `~/Library/Application Support/com.sharknia.ClaudeSessionWarmer/runtime-state.json`에 둡니다. 정상 백업·이전 원본·손상 원본도 같은 폴더에 보존합니다. 인증 토큰은 계속 Keychain에만 보관합니다. 운영 중 이 폴더나 잠금 파일을 삭제하지 마세요.
 - macOS에서 로그인 실행을 끈 뒤 예약 시각만 바꿔도 자동으로 다시 켜지지 않습니다. 캐시 비우기는 예약·실행 기록·인증을 초기화하지 않습니다.
+- 0.1.7 이하로 되돌리면 잠자기 방지 설정은 읽히지 않고, 그 버전이 설정을 다시 저장하면 `끔`으로 돌아갑니다. 다른 설정과 실행 기록은 영향이 없습니다.
 
 검증 명령은 `swift test`, `swift build -c release`, `python3 scripts/verify-execution.py`, `python3 scripts/verify-concurrent-storage.py`, `bash scripts/verify-scheduler.sh late 147`입니다. 단위 테스트와 타이머 검증은 메모리 설정을 사용합니다. 서명된 Keychain 검증은 임시 항목을 사용합니다. 별도 Mac/사용자 환경의 설치 검증 여부는 운영 절차와 검증 결과에 구분해 기록합니다.
 
