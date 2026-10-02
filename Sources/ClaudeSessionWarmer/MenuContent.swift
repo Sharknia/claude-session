@@ -16,6 +16,28 @@ enum MenuDateFormatting {
     }
 }
 
+/// 잠자기 방지 설정의 메뉴 문구. 화면과 테스트가 같은 문자열을 쓴다.
+enum MenuSleepPreventionText {
+    static func title(for mode: SleepPreventionMode) -> String {
+        switch mode {
+        case .off: return "끔"
+        case .aroundSchedule: return "예약 전후만"
+        case .always: return "상시"
+        }
+    }
+
+    static func caption(for mode: SleepPreventionMode) -> String {
+        switch mode {
+        case .off:
+            return "Mac의 자동 잠자기를 막지 않습니다."
+        case .aroundSchedule:
+            return "다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다. 배터리에서도 적용됩니다."
+        case .always:
+            return "전원 어댑터 연결 중에는 계속, 배터리에서는 다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다."
+        }
+    }
+}
+
 struct MenuContent: View {
     @ObservedObject var state: AppState
     @ObservedObject var updater: AppUpdater
@@ -23,6 +45,7 @@ struct MenuContent: View {
     @State private var draftWeekdays: Set<Int>
     @State private var draftExcludeHolidays: Bool
     @State private var draftLaunchAtLogin: Bool
+    @State private var draftSleepPrevention: SleepPreventionMode
     @State private var loginPreferenceChanged = false
     @State private var didSave = false
     @State private var confirmResend = false
@@ -39,6 +62,7 @@ struct MenuContent: View {
         _draftWeekdays = State(initialValue: state.settings.weekdays)
         _draftExcludeHolidays = State(initialValue: state.settings.excludeKoreanHolidays)
         _draftLaunchAtLogin = State(initialValue: state.settings.launchAtLogin)
+        _draftSleepPrevention = State(initialValue: state.settings.sleepPrevention)
     }
 
     var body: some View {
@@ -219,6 +243,34 @@ struct MenuContent: View {
                 )
             )
 
+            // 잠자기 방지: 다른 항목과 같이 초안만 바꾸고, 저장을 눌러야 적용된다.
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text("잠자기 방지")
+                        .frame(width: 104, alignment: .leading)
+                    Spacer()
+                    Picker(
+                        "",
+                        selection: Binding(
+                            get: { draftSleepPrevention },
+                            set: {
+                                draftSleepPrevention = $0
+                                didSave = false
+                            }
+                        )
+                    ) {
+                        ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
+                            Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
+                        }
+                    }
+                    .pickerStyle(.segmented)
+                    .labelsHidden()
+                }
+                Text(sleepPreventionCaption)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             HStack {
                 if didSave {
                     Label("저장됨", systemImage: "checkmark.circle.fill")
@@ -313,6 +365,11 @@ struct MenuContent: View {
             || draftWeekdays != state.settings.weekdays
             || draftExcludeHolidays != state.settings.excludeKoreanHolidays
             || draftLaunchAtLogin != state.settings.launchAtLogin
+            || draftSleepPrevention != state.settings.sleepPrevention
+    }
+
+    private var sleepPreventionCaption: String {
+        MenuSleepPreventionText.caption(for: draftSleepPrevention)
     }
 
     private var draftMinutes: Int {
@@ -353,13 +410,15 @@ struct MenuContent: View {
             firstWarmupDate: draftTime,
             weekdays: draftWeekdays,
             excludeKoreanHolidays: draftExcludeHolidays,
-            launchAtLogin: loginPreferenceChanged ? draftLaunchAtLogin : nil
+            launchAtLogin: loginPreferenceChanged ? draftLaunchAtLogin : nil,
+            sleepPrevention: draftSleepPrevention
         ) else { return }
 
         draftTime = state.firstWarmupDate
         draftWeekdays = state.settings.weekdays
         draftExcludeHolidays = state.settings.excludeKoreanHolidays
         draftLaunchAtLogin = state.settings.launchAtLogin
+        draftSleepPrevention = state.settings.sleepPrevention
         loginPreferenceChanged = false
         didSave = true
     }
