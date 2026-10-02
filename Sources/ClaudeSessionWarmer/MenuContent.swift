@@ -18,20 +18,12 @@ enum MenuDateFormatting {
 
 /// 잠자기 방지 설정의 메뉴 문구. 화면과 테스트가 같은 문자열을 쓴다.
 enum MenuSleepPreventionText {
-    /// 닫힌 선택 상자에 보이는 짧은 이름. 행을 작게 유지한다.
+    /// 선택 상자에 보이는 이름. 닫힌 상태와 펼친 목록이 같은 글자를 써서 목록 폭이 상자 폭을 넘지 않는다.
     static func title(for mode: SleepPreventionMode) -> String {
         switch mode {
         case .off: return "끔"
         case .aroundSchedule: return "예약 전후만"
         case .always: return "상시"
-        }
-    }
-
-    /// 펼친 목록에 보이는 이름. 상시는 전원 연결 중에만 계속 유지되므로 고르는 순간에 조건이 보이게 적는다.
-    static func menuItemTitle(for mode: SleepPreventionMode) -> String {
-        switch mode {
-        case .off, .aroundSchedule: return title(for: mode)
-        case .always: return "상시 (전원 연결 시)"
         }
     }
 
@@ -254,36 +246,30 @@ struct MenuContent: View {
             )
 
             // 잠자기 방지: 다른 항목과 같이 초안만 바꾸고, 저장을 눌러야 적용된다.
-            // 좁은 패널에서 글자가 눌리거나 잘리지 않도록 선택 상자 하나로 두고, 설명은 도움말로 뺀다.
+            // 표준 선택 상자 하나로 두고 설명은 도움말로 뺀다. 상자 폭은 가장 긴 이름에 맞춰 고정되므로
+            // 값을 바꿔도 크기가 변하지 않고, 펼친 목록도 상자와 같은 폭이라 패널 밖으로 나가지 않는다.
             HStack {
                 Text("잠자기 방지")
                     .frame(width: 104, alignment: .leading)
                 Spacer()
-                // 닫힌 상태는 짧은 이름만, 펼친 목록은 조건까지 보이는 이름을 쓴다.
-                Menu {
-                    Picker(
-                        "잠자기 방지",
-                        selection: Binding(
-                            get: { draftSleepPrevention },
-                            set: {
-                                draftSleepPrevention = $0
-                                didSave = false
-                            }
-                        )
-                    ) {
-                        ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
-                            Text(MenuSleepPreventionText.menuItemTitle(for: mode)).tag(mode)
+                Picker(
+                    "잠자기 방지",
+                    selection: Binding(
+                        get: { draftSleepPrevention },
+                        set: {
+                            draftSleepPrevention = $0
+                            didSave = false
                         }
+                    )
+                ) {
+                    ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
+                        Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
                     }
-                    .pickerStyle(.inline)
-                    .labelsHidden()
-                } label: {
-                    Text(MenuSleepPreventionText.title(for: draftSleepPrevention))
                 }
-                .menuStyle(.button)
+                .pickerStyle(.menu)
+                .labelsHidden()
                 .controlSize(.small)
                 .fixedSize()
-                .accessibilityLabel("잠자기 방지")
                 .help(MenuSleepPreventionText.helpText(for: draftSleepPrevention))
             }
 

@@ -381,41 +381,38 @@ private func armSleepLeadTimer(_ date: Date?) {
 HStack {
     Text("잠자기 방지").frame(width: 104, alignment: .leading)
     Spacer()
-    Menu {
-        Picker("잠자기 방지", selection: Binding(
-            get: { draftSleepPrevention },
-            set: { draftSleepPrevention = $0; didSave = false }
-        )) {
-            ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
-                Text(MenuSleepPreventionText.menuItemTitle(for: mode)).tag(mode)
-            }
+    Picker("잠자기 방지", selection: Binding(
+        get: { draftSleepPrevention },
+        set: { draftSleepPrevention = $0; didSave = false }
+    )) {
+        ForEach(SleepPreventionMode.allCases, id: \.self) { mode in
+            Text(MenuSleepPreventionText.title(for: mode)).tag(mode)
         }
-        .pickerStyle(.inline)
-        .labelsHidden()
-    } label: {
-        Text(MenuSleepPreventionText.title(for: draftSleepPrevention))
     }
-    .menuStyle(.button)
+    .pickerStyle(.menu)
+    .labelsHidden()
     .controlSize(.small)
     .fixedSize()
-    .accessibilityLabel("잠자기 방지")
     .help(MenuSleepPreventionText.helpText(for: draftSleepPrevention))
 }
 ```
 
-컨트롤은 작은 크기의 선택 상자(pull-down) 하나다. 처음에는 세그먼트 컨트롤과 항상 보이는 설명문으로 구현했으나, 실기 확인에서 `상시`의 설명문이 패널 폭 372에서 말줄임표로 잘렸다. 좁은 패널에 긴 문장을 상시 노출할 이유가 없어 다음과 같이 바꿨다.
+컨트롤은 작은 크기의 표준 선택 상자(pop-up) 하나다. 처음에는 세그먼트 컨트롤과 항상 보이는 설명문으로 구현했으나, 실기 확인에서 `상시`의 설명문이 패널 폭 372에서 말줄임표로 잘렸다. 좁은 패널에 긴 문장을 상시 노출할 이유가 없어 다음 기준으로 다시 정했다.
 
-- 닫힌 상태에는 짧은 이름만 보여 행을 작게 유지한다.
-- 펼친 목록에서는 조건이 드러나는 이름을 쓴다. `상시`는 목록에 "상시 (전원 연결 시)"로 표시한다. 문서와 저장 값에서 가리키는 이름은 그대로 `상시`(`always`)다.
+- 상자 폭은 가장 긴 이름("예약 전후만")에 맞춰 고정된다(약 91pt). 값을 바꿔도 크기가 변하지 않는다.
+- 닫힌 상태와 펼친 목록이 같은 글자를 쓴다. 목록 폭이 상자 폭과 같아(실측 90pt) 패널 밖으로 나가지 않는다.
+- 상자의 오른쪽 끝은 위 행들의 체크박스와 맞추고, 높이는 요일 버튼과 같게 한다.
 - 설명은 항상 노출하지 않고 선택 상자의 도움말(마우스를 올리면 보임)로 둔다.
 
-| 값 | 닫힌 상태 | 펼친 목록 | 도움말 |
-| --- | --- | --- | --- |
-| `끔` | "끔" | "끔" | "Mac의 자동 잠자기를 막지 않습니다." |
-| `예약 전후만` | "예약 전후만" | "예약 전후만" | "다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다. 배터리에서도 적용됩니다." |
-| `상시` | "상시" | "상시 (전원 연결 시)" | "전원 어댑터 연결 중에는 계속, 배터리에서는 다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다." |
+| 값 | 화면 표시 | 도움말 |
+| --- | --- | --- |
+| `끔` | "끔" | "Mac의 자동 잠자기를 막지 않습니다." |
+| `예약 전후만` | "예약 전후만" | "다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다. 배터리에서도 적용됩니다." |
+| `상시` | "상시" | "전원 어댑터 연결 중에는 계속, 배터리에서는 다음 워밍 30분 전부터 확인이 끝날 때까지 자동 잠자기를 막습니다." |
 
-`hasDraftChanges`(311~316행)에 `|| draftSleepPrevention != state.settings.sleepPrevention`을 추가하고, `saveDraft`(351~365행)는 `applySettings(…, sleepPrevention: draftSleepPrevention)`을 호출한 뒤 초안을 저장값으로 되돌린다. 라벨 104 + 오른쪽 정렬 컨트롤은 기존 "첫 워밍" 행과 같은 배치다. 선택 상자는 오른쪽 끝에 붙고, 폭은 선택한 값의 이름 길이를 따른다.
+`hasDraftChanges`(311~316행)에 `|| draftSleepPrevention != state.settings.sleepPrevention`을 추가하고, `saveDraft`(351~365행)는 `applySettings(…, sleepPrevention: draftSleepPrevention)`을 호출한 뒤 초안을 저장값으로 되돌린다. 라벨 104 + 오른쪽 정렬 컨트롤은 기존 "첫 워밍" 행과 같은 배치다.
+
+화면 변경은 라이트·다크 두 모드에서 세 값을 모두 렌더링해 확인한다(가짜 서비스를 주입한 `MenuContent`를 화면 밖 창에 그려 PNG로 저장). 글자 잘림, 값에 따른 크기 변화, 다른 행과의 정렬을 본다.
 
 ## 6. 변경 파일 목록
 

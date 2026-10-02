@@ -76,9 +76,6 @@ final class AppStateTests: XCTestCase {
     func testSleepPreventionMenuTextMatchesSpecCopy() {
         XCTAssertEqual(SleepPreventionMode.allCases.map { MenuSleepPreventionText.title(for: $0) },
                        ["끔", "예약 전후만", "상시"])
-        // 펼친 목록에서는 상시의 조건이 이름에 보여야 한다.
-        XCTAssertEqual(SleepPreventionMode.allCases.map { MenuSleepPreventionText.menuItemTitle(for: $0) },
-                       ["끔", "예약 전후만", "상시 (전원 연결 시)"])
         XCTAssertEqual(MenuSleepPreventionText.helpText(for: .off),
                        "Mac의 자동 잠자기를 막지 않습니다.")
         XCTAssertEqual(MenuSleepPreventionText.helpText(for: .aroundSchedule),
