@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import IOKit
 import Security
 import ServiceManagement
 import UserNotifications
@@ -37,6 +38,10 @@ final class AppState: ObservableObject {
     private let inspectClaude: @Sendable (String) async throws -> Inspection
     private let loginClaude: @Sendable () async throws -> Inspection
     private let warmClaude: @Sendable (URL, String) async throws -> Void
+    private let sleepAssertion: any IdleSleepAssertionHolding
+    private let isOnACPower: @Sendable () -> Bool
+    private var sleepLeadTimer: WallClockTimer?
+    private var powerSourceObserver: PowerSourceObserver?
     private var lifecycleMonitor: LifecycleMonitor?
     private var timer: WallClockTimer?
     private(set) var scheduledTimerID: UUID?
@@ -56,6 +61,8 @@ final class AppState: ObservableObject {
         inspectClaude: (@Sendable (String) async throws -> Inspection)? = nil,
         loginClaude: (@Sendable () async throws -> Inspection)? = nil,
         warmClaude: (@Sendable (URL, String) async throws -> Void)? = nil,
+        sleepAssertion: (any IdleSleepAssertionHolding)? = nil,
+        isOnACPower: @escaping @Sendable () -> Bool = { PowerSource.isOnACPower() },
         confirmationSleep: @escaping @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
     ) {
         let savedCycle = store.loadDailyCycle()
@@ -68,6 +75,9 @@ final class AppState: ObservableObject {
         self.inspectClaude = inspectClaude ?? { try await Self.inspectManagedClaude(operationID: $0) }
         self.loginClaude = loginClaude ?? { try await Self.loginManagedClaude() }
         self.warmClaude = warmClaude ?? { try await Self.runManagedWarmup(cliURL: $0, operationID: $1) }
+        // 재평가가 init 중에도 불릴 수 있으므로 settings 대입보다 먼저 초기화한다.
+        self.sleepAssertion = sleepAssertion ?? IdleSleepAssertion()
+        self.isOnACPower = isOnACPower
         settings = store.loadSettings()
         cycle = savedCycle
         status = savedCycle.lastRecord?.status ?? .idle
@@ -89,10 +99,22 @@ final class AppState: ObservableObject {
             "previous_status": savedCycle.lastRecord.map { String(describing: $0.status) } ?? "none"
         ])
 
+        // 차단으로 조기 return하거나 스케줄러를 켜지 않아도 초기 상태를 한 번 반영한다.
+        defer { reevaluateSleepPrevention(trigger: "startup") }
+
         if startScheduler {
             lifecycleMonitor = LifecycleMonitor { [weak self] reason in
                 Task { @MainActor [weak self] in
                     self?.reconcileSchedule(reason: reason)
+                }
+            }
+            // 전원 변경은 일정 재계산(reconcileSchedule)을 거치지 않고 재평가만 한다.
+            powerSourceObserver = PowerSourceObserver { [weak self] in
+                Task { @MainActor [weak self] in
+                    guard let self else { return }
+                    diagnosticLog("power.source_changed",
+                                  ["power_source": self.isOnACPower() ? "ac" : "battery_or_unknown"])
+                    self.reevaluateSleepPrevention(trigger: "power_source_changed")
                 }
             }
             if operationBlockReason != nil { return }
@@ -102,6 +124,48 @@ final class AppState: ObservableObject {
                 refreshSilently(force: true)
             }
         }
+    }
+
+    /// 현재 상태로 "쥐어야 하는가"를 다시 계산하고, 보유 여부와 다를 때만 획득·해제한다. 멱등이다.
+    /// 테스트에서 가짜 시계를 옮긴 뒤 직접 부른다.
+    func reevaluateSleepPrevention(trigger: String) {
+        let input = SleepPreventionPolicy.Input(
+            mode: settings.sleepPrevention, now: clock(), nextEventDate: nextEvent?.date,
+            isWorking: isWorking, isOnACPower: isOnACPower())
+        let shouldHold = SleepPreventionPolicy.shouldHold(input)
+        var metadata = ["trigger": trigger, "mode": input.mode.rawValue,
+                        "next_event_at": diagnosticDate(input.nextEventDate),
+                        "is_working": input.isWorking ? "true" : "false",
+                        "power_source": input.isOnACPower ? "ac" : "battery_or_unknown"]
+        if shouldHold != sleepAssertion.isHeld {
+            if shouldHold {
+                let result = sleepAssertion.acquire()
+                metadata["io_return"] = Self.hexadecimal(result)
+                // 실패해도 별도 재시도 타이머를 두지 않는다. 다음 재평가에서 다시 시도한다.
+                diagnosticLogCritical(result == kIOReturnSuccess ? "sleep_prevention.acquired"
+                                                                 : "sleep_prevention.acquire_failed", metadata)
+            } else {
+                metadata["io_return"] = Self.hexadecimal(sleepAssertion.release())
+                diagnosticLogCritical("sleep_prevention.released", metadata)
+            }
+        }
+        armSleepLeadTimer(SleepPreventionPolicy.nextEvaluationDate(input))
+    }
+
+    /// 다음 예약 30분 전에 한 번 재평가하도록 건다. nil이면 기존 타이머만 취소한다.
+    private func armSleepLeadTimer(_ date: Date?) {
+        sleepLeadTimer?.cancel()
+        sleepLeadTimer = nil
+        guard let date, schedulerEnabled else { return }
+        sleepLeadTimer = WallClockTimer(at: date) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.reevaluateSleepPrevention(trigger: "lead_time")
+            }
+        }
+    }
+
+    private static func hexadecimal(_ value: IOReturn) -> String {
+        String(format: "0x%08x", UInt32(bitPattern: value))
     }
 
     @discardableResult

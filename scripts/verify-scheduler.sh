@@ -15,6 +15,7 @@ swiftc -parse-as-library -swift-version 6 -target arm64-apple-macos14.0 \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ClaudeService.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/ManagedCredentialStore.swift" \
   "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/AppState.swift" \
+  "$SCHEDULER_ROOT/Sources/ClaudeSessionWarmer/SleepPrevention.swift" \
   "$SCHEDULER_ROOT/Tests/ClaudeSessionWarmerTests/MemoryDefaults.swift" \
   "$SCHEDULER_ROOT/scripts/VerifyConcurrentStorage.swift" \
   "$SCHEDULER_ROOT/scripts/VerifyScheduler.swift" \
